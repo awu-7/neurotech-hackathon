@@ -2,6 +2,7 @@
 import time
 import customtkinter as ctk
 import pyautogui
+from bridge import start_bridge, send_command
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -38,6 +39,7 @@ def start_session():
     start_button.configure(state="disabled")
     message_label.configure(text="Session started. Try the demo buttons below.")
     update_screen()
+    send_command("discard")
 
 
 def simulate_unfocused():
@@ -49,6 +51,7 @@ def simulate_unfocused():
 
     if focused:
         focused = False
+        send_command("distracted")
         unfocused_start = time.monotonic()
         unfocused_seconds = 0
 
@@ -74,8 +77,10 @@ def simulate_focused():
             continue_button.configure(state="normal")
         else:
             message_label.configure(text="Short distraction. No rewind needed.")
+            send_command("discard")
 
     focused = True
+    send_command("focused")
     unfocused_seconds = 0
     update_screen()
 
@@ -96,15 +101,30 @@ def continue_lecture():
     rewind_button.configure(state="disabled")
     continue_button.configure(state="disabled")
     message_label.configure(text="Continuing without rewinding.")
+    send_command("discard")
 
 
 def send_rewind(seconds):
-    try:
-        pyautogui.press("left", presses=seconds // 5, interval=0.2)
-        message_label.configure(text=f"Sent {seconds // 5} rewind commands.")
-    except Exception as error:
-        message_label.configure(text=f"Rewind error: {error}")
+    original_speed = float(speed_var.get().replace("x", ""))
 
+    # Rewind the video
+    presses = max(1, seconds // 5)
+    pyautogui.press("left", presses=presses, interval=0.2)
+
+    # Don't slow down below 0.25x
+    if original_speed <= 0.25:
+        return
+
+    # Slow down by 0.25x
+    pyautogui.hotkey("shift", ",")
+
+    slower_speed = original_speed - 0.25
+
+    # Calculate how long replay should take
+    replay_time = (presses * 5) / slower_speed
+
+    # Restore the original speed
+    app.after(int(replay_time * 1000),lambda: pyautogui.hotkey("shift", "."))
 
 def rewind_lecture():
     global pending_rewind
@@ -120,7 +140,7 @@ def rewind_lecture():
         text="Switch to your video using Alt+Tab. Rewinding in 5 seconds!"
     )
 
-    app.after(5000, lambda: send_rewind(seconds))
+    send_command("rewind")
 
 
 header = ctk.CTkLabel(
@@ -238,5 +258,17 @@ continue_button = ctk.CTkButton(
 )
 continue_button.pack(side="left", padx=8)
 
+speed_var = ctk.StringVar(value="1.75x")
+
+speed_menu = ctk.CTkOptionMenu(
+    app,
+    values=["0.5x", "0.75x", "1x", "1.25x",
+            "1.5x", "1.75x", "2x"],
+    variable=speed_var
+)
+
+speed_menu.pack(pady=10)
+
 update_timer()
+start_bridge()
 app.mainloop()
