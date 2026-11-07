@@ -312,4 +312,76 @@ class ReceiverApp(tk.Tk):
                 raw_eeg -= np.mean(raw_eeg)
 
                 # Filter Alpha and Beta bands
-                filtered_alpha
+                filtered_alpha = np.nan_to_num(filtfilt(self.b_alpha, self.a_alpha, raw_eeg))
+                filtered_beta = np.nan_to_num(filtfilt(self.b_beta, self.a_beta, raw_eeg))
+
+                # Compute Band Power (Mean Square Signal Amplitude)
+                alpha_power = float(np.mean(filtered_alpha ** 2))
+                beta_power = float(np.mean(filtered_beta ** 2))
+
+                # Compute Ratios (prevent division by zero using small epsilon)
+                eps = 1e-9
+                ab_ratio = alpha_power / (beta_power + eps)
+                ba_ratio = beta_power / (alpha_power + eps)  # Cognitive Focus Index
+
+                # Compute FFT & Detect Peak Frequencies / Amplitudes
+                f_pos_a, P_pos_a, alpha_freq, alpha_amp = find_peak(
+                    filtered_alpha, self.srate, band_low=8.0, band_high=13.0
+                )
+                f_pos_b, P_pos_b, beta_freq, beta_amp = find_peak(
+                    filtered_beta, self.srate, band_low=13.0, band_high=30.0
+                )
+
+                # Log Peak Metrics & Ratio Calculations to CSV
+                self.results_writer.writerow([
+                    datetime.now().strftime("%H:%M:%S.%f"),
+                    f"{alpha_freq:.2f}", f"{alpha_amp:.2f}",
+                    f"{beta_freq:.2f}", f"{beta_amp:.2f}",
+                    f"{alpha_power:.4f}", f"{beta_power:.4f}",
+                    f"{ab_ratio:.4f}", f"{ba_ratio:.4f}"
+                ])
+
+                # Update HUD Header
+                self.ratio_hud_var.set(
+                    f"Alpha/Beta Ratio: {ab_ratio:.2f}  |  Focus Index (Beta/Alpha): {ba_ratio:.2f}  |  Alpha Power: {alpha_power:.1f}  Beta Power: {beta_power:.1f}"
+                )
+
+                # Update Time-Domain Signals
+                self.line_alpha.set_ydata(filtered_alpha)
+                self.line_beta.set_ydata(filtered_beta)
+
+                scale = self.scale_var.get()
+                self.ax_alpha.set_ylim(-scale, scale)
+                self.ax_beta.set_ylim(-scale, scale)
+
+                # Update FFT Power Spectra & Markers
+                alpha_mask = f_pos_a <= 40
+                self.line_alpha_fft.set_data(f_pos_a[alpha_mask], P_pos_a[alpha_mask])
+                self.marker_alpha_fft.set_data([alpha_freq], [alpha_amp])
+                self.ax_alpha_fft.set_title(
+                    f"Alpha FFT - Peak: {alpha_freq:.1f} Hz ({alpha_amp:.2f} uV)", fontsize=10
+                )
+                self.ax_alpha_fft.set_ylim(0, max(0.1, np.max(P_pos_a[alpha_mask]) * 1.15))
+
+                beta_mask = f_pos_b <= 40
+                self.line_beta_fft.set_data(f_pos_b[beta_mask], P_pos_b[beta_mask])
+                self.marker_beta_fft.set_data([beta_freq], [beta_amp])
+                self.ax_beta_fft.set_title(
+                    f"Beta FFT - Peak: {beta_freq:.1f} Hz ({beta_amp:.2f} uV)", fontsize=10
+                )
+                self.ax_beta_fft.set_ylim(0, max(0.1, np.max(P_pos_b[beta_mask]) * 1.15))
+
+                self.canvas.draw_idle()
+
+        self._after_id = self.after(REDRAW_MS, self._update)
+
+    # -- Shutdown Handling --------------------------------------------------
+    def on_close(self):
+        try:
+            self.disconnect()
+        finally:
+            self.destroy()
+
+
+if __name__ == "__main__":
+    ReceiverApp().mainloop()
