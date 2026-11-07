@@ -482,4 +482,106 @@ class ReceiverApp(tk.Tk):
 
     # -- Main Update Loop --------------------------------------------------
     def _update(self):
-        if self
+        if self.inlet is None:
+            return
+
+        chunk, timestamps = self.inlet.pull_chunk(timeout=0.0)
+        if chunk:
+            data = np.asarray(chunk, dtype=np.float64).T  # (n_channels, n_samples)
+            k = data.shape[1]
+
+            # Log raw stream samples to CSV
+            for col_idx in range(k):
+                ts = timestamps[col_idx] if timestamps else time.time()
+                raw_sample = data[:, col_idx].tolist()
+                self.log_writer.writerow([ts] + raw_sample)
+
+            # Update rolling buffer
+            if k >= self.buffer.shape[1]:
+                self.buffer = data[:, -self.buffer.shape[1]:]
+            else:
+                self.buffer = np.roll(self.buffer, -k, axis=1)
+                self.buffer[:, -k:] = data
+
+            # Evaluate posture and signal metrics if not paused
+            if not self.is_paused:
+                self._process_posture()
+                raw_eeg = self.buffer[0, :].copy()
+
+                if not np.all(raw_eeg == 0):
+                    raw_eeg -= np.mean(raw_eeg)
+
+                    # Filter EEG signals
+                    filtered_alpha = np.nan_to_num(filtfilt(self.b_alpha, self.a_alpha, raw_eeg))
+                    filtered_beta = np.nan_to_num(filtfilt(self.b_beta, self.a_beta, raw_eeg))
+
+                    # Band Power & Ratios
+                    alpha_power = float(np.mean(filtered_alpha ** 2))
+                    beta_power = float(np.mean(filtered_beta ** 2))
+                    eps = 1e-9
+                    ab_ratio = alpha_power / (beta_power + eps)
+                    ba_ratio = beta_power / (alpha_power + eps)
+
+                    # Active Calibration Step
+                    if self.is_calibrating:
+                        self._update_calibration(ab_ratio)
+
+                    # Peak Frequencies & Amplitudes
+                    f_pos_a, P_pos_a, alpha_freq, alpha_amp = find_peak(
+                        filtered_alpha, self.srate, band_low=8.0, band_high=13.0
+                    )
+                    f_pos_b, P_pos_b, beta_freq, beta_amp = find_peak(
+                        filtered_beta, self.srate, band_low=13.0, band_high=30.0
+                    )
+
+                    # Log computed metrics and posture alert status
+                    self.results_writer.writerow([
+                        datetime.now().strftime("%H:%M:%S.%f"),
+                        f"{alpha_freq:.2f}", f"{alpha_amp:.2f}",
+                        f"{beta_freq:.2f}", f"{beta_amp:.2f}",
+                        f"{alpha_power:.4f}", f"{beta_power:.4f}",
+                        f"{ab_ratio:.4f}", f"{self.baseline_ratio:.4f}",
+                        f"{self.current_pitch_deg:.2f}", int(self.tilt_alert_active)
+                    ])
+
+                    # Color rule: Red if 1.5x above calibration baseline, Green if below
+                    threshold = 1.5 * self.baseline_ratio
+                    text_color = "#FF4444" if ab_ratio >= threshold else "#00FF66"
+
+                    self.hud_label.configure(fg=text_color)
+                    self.ratio_hud_var.set(
+                        f"Alpha/Beta Ratio: {ab_ratio:.2f}  |  Focus Index: {ba_ratio:.2f}  |  Baseline: {self.baseline_ratio:.2f} (Limit: {threshold:.2f})"
+                    )
+
+                    # Update Plots
+                    self.line_alpha.set_ydata(filtered_alpha)
+                    self.line_beta.set_ydata(filtered_beta)
+
+                    scale = self.scale_var.get()
+                    self.ax_alpha.set_ylim(-scale, scale)
+                    self.ax_beta.set_ylim(-scale, scale)
+
+                    alpha_mask = f_pos_a <= 40
+                    self.line_alpha_fft.set_data(f_pos_a[alpha_mask], P_pos_a[alpha_mask])
+                    self.marker_alpha_fft.set_data([alpha_freq], [alpha_amp])
+                    self.ax_alpha_fft.set_ylim(0, max(0.1, np.max(P_pos_a[alpha_mask]) * 1.15))
+
+                    beta_mask = f_pos_b <= 40
+                    self.line_beta_fft.set_data(f_pos_b[beta_mask], P_pos_b[beta_mask])
+                    self.marker_beta_fft.set_data([beta_freq], [beta_amp])
+                    self.ax_beta_fft.set_ylim(0, max(0.1, np.max(P_pos_b[beta_mask]) * 1.15))
+
+                    self.canvas.draw_idle()
+
+        self._after_id = self.after(REDRAW_MS, self._update)
+
+    # -- Clean Shutdown ----------------------------------------------------
+    def on_close(self):
+        try:
+            self.disconnect()
+        finally:
+            self.destroy()
+
+
+if __name__ == "__main__":
+    ReceiverApp().mainloop()
