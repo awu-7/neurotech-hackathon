@@ -13,6 +13,8 @@ from pylsl import StreamInlet, resolve_streams
 
 WINDOW_SECONDS = 5.0     # Sliding window length for signal analysis
 REDRAW_MS = 40           # ~25 FPS redraw timer
+TILT_THRESHOLD_DEG = 30.0# Forward tilt angle trigger (degrees)
+TILT_DURATION_SEC = 5.0  # Duration threshold in seconds
 
 
 def find_peak(filtered_signal, srate, band_low, band_high):
@@ -45,8 +47,8 @@ def find_peak(filtered_signal, srate, band_low, band_high):
 class ReceiverApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("NeuroPawn Knight - LSL Alpha/Beta & Calibration Analyzer")
-        self.geometry("1100x850")
+        self.title("NeuroPawn Knight - LSL Cognitive Load & Posture Analyzer")
+        self.geometry("1150x880")
 
         self.inlet = None
         self.srate = 250.0
@@ -65,6 +67,14 @@ class ReceiverApp(tk.Tk):
         self.calibration_samples = []
         self.calibration_end_time = 0.0
         self.calib_win = None
+
+        # IMU Posture Tracker State
+        self.acc_x_idx = None
+        self.acc_y_idx = None
+        self.acc_z_idx = None
+        self.tilt_start_time = None
+        self.tilt_alert_active = False
+        self.current_pitch_deg = 0.0
 
         # CSV Logging Handles
         self.log_file = None
@@ -119,9 +129,9 @@ class ReceiverApp(tk.Tk):
             side="right", padx=6
         )
 
-        # Live Real-Time Ratio HUD Header
+        # Real-Time Telemetry HUD Banner
         hud_frame = tk.Frame(self, bg="#181818", bd=2, relief="groove")
-        hud_frame.pack(side="top", fill="x", padx=6, pady=(0, 4))
+        hud_frame.pack(side="top", fill="x", padx=6, pady=(0, 2))
 
         self.ratio_hud_var = tk.StringVar(
             value="Alpha/Beta Ratio: -- | Focus Index: -- | Baseline: 1.00"
@@ -129,21 +139,39 @@ class ReceiverApp(tk.Tk):
         self.hud_label = tk.Label(
             hud_frame,
             textvariable=self.ratio_hud_var,
-            font=("Consolas", 12, "bold"),
+            font=("Consolas", 11, "bold"),
             fg="#00FFCC",
             bg="#181818",
             padx=10,
-            pady=6
+            pady=4
         )
         self.hud_label.pack(side="left")
+
+        # Posture Alert Banner
+        posture_frame = tk.Frame(self, bg="#111111", bd=2, relief="sunken")
+        posture_frame.pack(side="top", fill="x", padx=6, pady=(0, 4))
+
+        self.posture_hud_var = tk.StringVar(
+            value="Posture Status: Searching for IMU channels..."
+        )
+        self.posture_label = tk.Label(
+            posture_frame,
+            textvariable=self.posture_hud_var,
+            font=("Consolas", 11, "bold"),
+            fg="#AAAAAA",
+            bg="#111111",
+            padx=10,
+            pady=4
+        )
+        self.posture_label.pack(side="left")
 
         self.status_var = tk.StringVar(value="Not connected.")
         ttk.Label(self, textvariable=self.status_var).pack(
             side="bottom", fill="x", padx=6, pady=2
         )
 
-        # Figure with GridSpec (Time-domain plots larger, Power band plots smaller)
-        self.fig = Figure(figsize=(10, 6.5), dpi=100)
+        # Figure GridSpec (Time-domain plots larger, Power band plots smaller)
+        self.fig = Figure(figsize=(10, 6.2), dpi=100)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(
             side="top", fill="both", expand=True, padx=6, pady=6
@@ -169,7 +197,7 @@ class ReceiverApp(tk.Tk):
             self.stream_combo.current(idx)
         self.status_var.set(f"Found {len(names)} stream(s).")
 
-    # -- Pause & Connection Handling ---------------------------------------
+    # -- Connection & IMU Index Detection ----------------------------------
     def toggle_pause(self):
         self.is_paused = not self.is_paused
         if self.is_paused:
@@ -199,6 +227,14 @@ class ReceiverApp(tk.Tk):
         self.srate = full.nominal_srate() if full.nominal_srate() > 0 else 250.0
         self.labels = self._read_labels(full, self.n_channels)
 
+        # Detect Accelerometer Channels for Head Posture (Default mapping: 8=X, 9=Y, 10=Z)
+        self.acc_x_idx = self._find_channel_index(["ACC_X", "ACCEL_X", "AX"], fallback=8 if self.n_channels >= 11 else None)
+        self.acc_y_idx = self._find_channel_index(["ACC_Y", "ACCEL_Y", "AY"], fallback=9 if self.n_channels >= 11 else None)
+        self.acc_z_idx = self._find_channel_index(["ACC_Z", "ACCEL_Z", "AZ"], fallback=10 if self.n_channels >= 11 else None)
+
+        self.tilt_start_time = None
+        self.tilt_alert_active = False
+
         n_samples = max(1, int(self.srate * WINDOW_SECONDS))
         self.buffer = np.zeros((self.n_channels, n_samples), dtype=np.float64)
 
@@ -223,15 +259,18 @@ class ReceiverApp(tk.Tk):
         self.results_writer = csv.writer(self.results_file)
         self.results_writer.writerow([
             "timestamp", "alphaPeakFreqHz", "alphaPeakAmp", "betaPeakFreqHz", 
-            "betaPeakAmp", "alphaPower", "betaPower", "alphaBetaRatio", "baselineRatio"
+            "betaPeakAmp", "alphaPower", "betaPower", "alphaBetaRatio", 
+            "baselineRatio", "pitchDeg", "postureAlert"
         ])
 
         self._build_axes()
         self.connect_btn.configure(text="Disconnect")
         self.pause_btn.configure(state="normal")
         self.calib_btn.configure(state="normal")
+        
+        imu_status = "IMU Active" if self.acc_y_idx is not None else "No IMU detected"
         self.status_var.set(
-            f"Connected to {info.name()} - {self.n_channels} ch @ {self.srate:.0f} Hz."
+            f"Connected to {info.name()} - {self.n_channels} ch @ {self.srate:.0f} Hz ({imu_status})."
         )
         self._after_id = self.after(REDRAW_MS, self._update)
 
@@ -259,6 +298,16 @@ class ReceiverApp(tk.Tk):
         self.status_var.set("Disconnected. Logs saved to /log directory.")
         self.hud_label.configure(fg="#00FFCC")
         self.ratio_hud_var.set("Alpha/Beta Ratio: -- | Focus Index: -- | Baseline: 1.00")
+        self.posture_hud_var.set("Posture Status: Not connected.")
+        self.posture_label.configure(fg="#AAAAAA")
+
+    def _find_channel_index(self, target_keywords, fallback=None):
+        for idx, label in enumerate(self.labels):
+            if any(kw in label.upper() for kw in target_keywords):
+                return idx
+        if fallback is not None and fallback < len(self.labels):
+            return fallback
+        return None
 
     @staticmethod
     def _read_labels(info, n_channels):
@@ -285,7 +334,6 @@ class ReceiverApp(tk.Tk):
         self.calibration_samples = []
         self.calibration_end_time = time.time() + 5.0
 
-        # Calibration Popup Window with Focus Target Dot
         self.calib_win = tk.Toplevel(self)
         self.calib_win.title("Baseline Focus Calibration")
         self.calib_win.geometry("400x350")
@@ -302,7 +350,6 @@ class ReceiverApp(tk.Tk):
         )
         lbl.pack(pady=15)
 
-        # Canvas for central target dot
         canvas = tk.Canvas(self.calib_win, width=180, height=180, bg="#111111", highlightthickness=0)
         canvas.pack()
         canvas.create_oval(30, 30, 150, 150, fill="#00FFCC", outline="#FFFFFF", width=3)
@@ -339,8 +386,6 @@ class ReceiverApp(tk.Tk):
     # -- Subplot Setup (GridSpec for smaller power band graphs) ------------
     def _build_axes(self):
         self.fig.clear()
-
-        # height_ratios=[3, 1] makes the top time-domain graphs 3x larger than bottom FFT power band graphs
         gs = self.fig.add_gridspec(2, 2, height_ratios=[3, 1], hspace=0.35, wspace=0.2)
 
         self.ax_alpha = self.fig.add_subplot(gs[0, 0])
@@ -365,127 +410,4 @@ class ReceiverApp(tk.Tk):
         self.ax_beta.set_ylabel("uV", fontsize=8)
         self.ax_beta.set_xlim(-WINDOW_SECONDS, 0)
 
-        # Smaller Power Band / FFT Subplots
-        (self.line_alpha_fft,) = self.ax_alpha_fft.plot([], [], color='cyan', linewidth=1.0)
-        (self.marker_alpha_fft,) = self.ax_alpha_fft.plot([], [], 'ro', markersize=5)
-        self.ax_alpha_fft.set_title("Alpha Power Spectrum", fontsize=8)
-        self.ax_alpha_fft.set_xlabel("Hz", fontsize=7)
-        self.ax_alpha_fft.set_ylabel("Mag", fontsize=7)
-        self.ax_alpha_fft.tick_params(labelsize=7)
-        self.ax_alpha_fft.set_xlim(0, 40)
-        self.ax_alpha_fft.set_ylim(bottom=0)
-
-        (self.line_beta_fft,) = self.ax_beta_fft.plot([], [], color='cyan', linewidth=1.0)
-        (self.marker_beta_fft,) = self.ax_beta_fft.plot([], [], 'ro', markersize=5)
-        self.ax_beta_fft.set_title("Beta Power Spectrum", fontsize=8)
-        self.ax_beta_fft.set_xlabel("Hz", fontsize=7)
-        self.ax_beta_fft.set_ylabel("Mag", fontsize=7)
-        self.ax_beta_fft.tick_params(labelsize=7)
-        self.ax_beta_fft.set_xlim(0, 40)
-        self.ax_beta_fft.set_ylim(bottom=0)
-
-        self.canvas.draw()
-
-    # -- Main Update Loop --------------------------------------------------
-    def _update(self):
-        if self.inlet is None:
-            return
-
-        chunk, timestamps = self.inlet.pull_chunk(timeout=0.0)
-        if chunk:
-            data = np.asarray(chunk, dtype=np.float64).T  # (n_channels, n_samples)
-            k = data.shape[1]
-
-            # Write raw data to CSV regardless of pause state
-            for col_idx in range(k):
-                ts = timestamps[col_idx] if timestamps else time.time()
-                raw_sample = data[:, col_idx].tolist()
-                self.log_writer.writerow([ts] + raw_sample)
-
-            # Update rolling buffer
-            if k >= self.buffer.shape[1]:
-                self.buffer = data[:, -self.buffer.shape[1]:]
-            else:
-                self.buffer = np.roll(self.buffer, -k, axis=1)
-                self.buffer[:, -k:] = data
-
-            # Process metrics if not paused
-            if not self.is_paused:
-                raw_eeg = self.buffer[0, :].copy()
-
-                if not np.all(raw_eeg == 0):
-                    raw_eeg -= np.mean(raw_eeg)
-
-                    # Filter signals
-                    filtered_alpha = np.nan_to_num(filtfilt(self.b_alpha, self.a_alpha, raw_eeg))
-                    filtered_beta = np.nan_to_num(filtfilt(self.b_beta, self.a_beta, raw_eeg))
-
-                    # Calculate Band Power & Ratios
-                    alpha_power = float(np.mean(filtered_alpha ** 2))
-                    beta_power = float(np.mean(filtered_beta ** 2))
-                    eps = 1e-9
-                    ab_ratio = alpha_power / (beta_power + eps)
-                    ba_ratio = beta_power / (alpha_power + eps)
-
-                    # Active Calibration Step
-                    if self.is_calibrating:
-                        self._update_calibration(ab_ratio)
-
-                    # Peak Frequencies & Amplitudes
-                    f_pos_a, P_pos_a, alpha_freq, alpha_amp = find_peak(
-                        filtered_alpha, self.srate, band_low=8.0, band_high=13.0
-                    )
-                    f_pos_b, P_pos_b, beta_freq, beta_amp = find_peak(
-                        filtered_beta, self.srate, band_low=13.0, band_high=30.0
-                    )
-
-                    # Log computed metrics
-                    self.results_writer.writerow([
-                        datetime.now().strftime("%H:%M:%S.%f"),
-                        f"{alpha_freq:.2f}", f"{alpha_amp:.2f}",
-                        f"{beta_freq:.2f}", f"{beta_amp:.2f}",
-                        f"{alpha_power:.4f}", f"{beta_power:.4f}",
-                        f"{ab_ratio:.4f}", f"{self.baseline_ratio:.4f}"
-                    ])
-
-                    # Color rule: Red if 1.5x above calibration baseline, Green if below
-                    threshold = 1.5 * self.baseline_ratio
-                    text_color = "#FF4444" if ab_ratio >= threshold else "#00FF66"
-
-                    self.hud_label.configure(fg=text_color)
-                    self.ratio_hud_var.set(
-                        f"Alpha/Beta Ratio: {ab_ratio:.2f}  |  Focus Index: {ba_ratio:.2f}  |  Baseline: {self.baseline_ratio:.2f} (Limit: {threshold:.2f})"
-                    )
-
-                    # Update Plots
-                    self.line_alpha.set_ydata(filtered_alpha)
-                    self.line_beta.set_ydata(filtered_beta)
-
-                    scale = self.scale_var.get()
-                    self.ax_alpha.set_ylim(-scale, scale)
-                    self.ax_beta.set_ylim(-scale, scale)
-
-                    alpha_mask = f_pos_a <= 40
-                    self.line_alpha_fft.set_data(f_pos_a[alpha_mask], P_pos_a[alpha_mask])
-                    self.marker_alpha_fft.set_data([alpha_freq], [alpha_amp])
-                    self.ax_alpha_fft.set_ylim(0, max(0.1, np.max(P_pos_a[alpha_mask]) * 1.15))
-
-                    beta_mask = f_pos_b <= 40
-                    self.line_beta_fft.set_data(f_pos_b[beta_mask], P_pos_b[beta_mask])
-                    self.marker_beta_fft.set_data([beta_freq], [beta_amp])
-                    self.ax_beta_fft.set_ylim(0, max(0.1, np.max(P_pos_b[beta_mask]) * 1.15))
-
-                    self.canvas.draw_idle()
-
-        self._after_id = self.after(REDRAW_MS, self._update)
-
-    # -- Clean Shutdown ----------------------------------------------------
-    def on_close(self):
-        try:
-            self.disconnect()
-        finally:
-            self.destroy()
-
-
-if __name__ == "__main__":
-    ReceiverApp().mainloop()
+        # Smaller Power
