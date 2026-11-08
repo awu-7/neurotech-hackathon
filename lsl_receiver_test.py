@@ -61,7 +61,7 @@ def find_peak(filtered_signal, srate, band_low, band_high):
 class ReceiverApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("NeuroPawn Knight - Sleek Multimodal Studio")
+        self.title("NeuroPawn Knight - Multimodal Studio")
         self.geometry("1240x940")
         self.configure(bg=DARK_BG)
 
@@ -495,17 +495,17 @@ class ReceiverApp(tk.Tk):
     def _build_axes(self):
         self.fig.clear()
         
-        # 3 Rows x 12 Columns layout for ultra-thinner vertical focus bar (1/12th ratio)
-        gs = self.fig.add_gridspec(3, 12, height_ratios=[2.2, 1.6, 1.8], hspace=0.48, wspace=0.35)
+        # 3 Rows x 16 Columns layout for an ultra-thin vertical focus bar (1/16th ratio)
+        gs = self.fig.add_gridspec(3, 16, height_ratios=[2.2, 1.6, 1.8], hspace=0.48, wspace=0.35)
 
-        self.ax_alpha = self.fig.add_subplot(gs[0, 0:6])
-        self.ax_beta = self.fig.add_subplot(gs[0, 6:12])
-        self.ax_ab_ratio = self.fig.add_subplot(gs[1, 0:11])
-        self.ax_focus_bar = self.fig.add_subplot(gs[1, 11])
-        self.ax_alpha_fft = self.fig.add_subplot(gs[2, 0:6])
-        self.ax_beta_fft = self.fig.add_subplot(gs[2, 6:12])
+        self.ax_alpha = self.fig.add_subplot(gs[0, 0:8])
+        self.ax_beta = self.fig.add_subplot(gs[0, 8:16])
+        self.ax_ab_ratio = self.fig.add_subplot(gs[1, 0:15])
+        self.ax_focus_bar = self.fig.add_subplot(gs[1, 15])
+        self.ax_alpha_fft = self.fig.add_subplot(gs[2, 0:8])
+        self.ax_beta_fft = self.fig.add_subplot(gs[2, 8:16])
 
-        axes_list = [self.ax_alpha, self.ax_beta, self.ax_ab_ratio, self.ax_alpha_fft, self.ax_beta_fft]
+        axes_list = [self.ax_alpha, self.ax_beta, self.ax_ab_ratio, self.ax_focus_bar, self.ax_alpha_fft, self.ax_beta_fft]
         for ax in axes_list:
             ax.set_facecolor(CARD_BG)
             ax.xaxis.label.set_color(TEXT_MUTED)
@@ -537,18 +537,15 @@ class ReceiverApp(tk.Tk):
         self.ax_ab_ratio.set_xlim(-AB_WINDOW_SECONDS, 0)
         self.ax_ab_ratio.grid(True, linestyle=':', color=CARD_BORDER, alpha=0.6)
 
-        # Ultra-Thin Vertical Stacked Bar Chart for Session Immediate Focus Percentage
-        self.ax_focus_bar.set_facecolor(CARD_BG)
-        self.ax_focus_bar.set_title("Focus", fontsize=8, fontweight='bold', color=TEXT_MAIN)
+        # Ultra-Thin Vertical Stacked Bar Chart for Session Focus Percentage
+        self.ax_focus_bar.set_title("Focus %", fontsize=7, fontweight='bold', color=TEXT_MAIN)
         self.ax_focus_bar.set_xlim(-0.5, 0.5)
         self.ax_focus_bar.set_ylim(0, 100)
         self.ax_focus_bar.set_xticks([])
         self.ax_focus_bar.tick_params(colors=TEXT_MUTED, labelsize=7)
-        for spine in self.ax_focus_bar.spines.values():
-            spine.set_color(CARD_BORDER)
 
-        self.bar_green = self.ax_focus_bar.bar([0], [100], color=ACCENT_GREEN, width=0.35)
-        self.bar_red = self.ax_focus_bar.bar([0], [0], bottom=[100], color=ACCENT_RED, width=0.35)
+        self.bar_green = self.ax_focus_bar.bar([0], [100], color=ACCENT_GREEN, width=0.3)
+        self.bar_red = self.ax_focus_bar.bar([0], [0], bottom=[100], color=ACCENT_RED, width=0.3)
         self.text_focus_pct = self.ax_focus_bar.text(
             0, 50, "100%", color="#0B0D10", ha='center', va='center', fontweight='bold', fontsize=7
         )
@@ -608,37 +605,44 @@ class ReceiverApp(tk.Tk):
             self.posture_label.configure(fg=ACCENT_GREEN)
 
     def _update(self):
+        # Re-schedule timer cycle first to guarantee UI thread continuity
         if self.inlet is None:
             return
 
-        chunk, timestamps = self.inlet.pull_chunk(timeout=0.0)
-        if chunk:
-            data = np.asarray(chunk, dtype=np.float64).T
-            k = data.shape[1]
+        self._after_id = self.after(REDRAW_MS, self._update)
 
-            for col_idx in range(k):
-                ts = timestamps[col_idx] if timestamps else time.time()
-                self.log_writer.writerow([ts] + data[:, col_idx].tolist())
+        try:
+            chunk, timestamps = self.inlet.pull_chunk(timeout=0.0)
+            if chunk:
+                data = np.asarray(chunk, dtype=np.float64).T
+                data = np.nan_to_num(data, nan=0.0)
+                k = data.shape[1]
 
-            if k >= self.buffer.shape[1]:
-                self.buffer = data[:, -self.buffer.shape[1]:]
-            else:
-                self.buffer = np.roll(self.buffer, -k, axis=1)
-                self.buffer[:, -k:] = data
+                for col_idx in range(k):
+                    ts = timestamps[col_idx] if timestamps else time.time()
+                    self.log_writer.writerow([ts] + data[:, col_idx].tolist())
 
-            if not self.is_paused:
+                if k >= self.buffer.shape[1]:
+                    self.buffer = data[:, -self.buffer.shape[1]:]
+                else:
+                    self.buffer = np.roll(self.buffer, -k, axis=1)
+                    self.buffer[:, -k:] = data
+
+            if not self.is_paused and self.buffer is not None:
                 self._process_posture()
-                raw_eeg = self.buffer[0, :].copy()
+                raw_eeg = np.nan_to_num(self.buffer[0, :].copy(), nan=0.0)
 
                 if not np.all(raw_eeg == 0):
                     raw_eeg -= np.mean(raw_eeg)
 
-                    filtered_alpha = np.nan_to_num(filtfilt(self.b_alpha, self.a_alpha, raw_eeg))
-                    filtered_beta = np.nan_to_num(filtfilt(self.b_beta, self.a_beta, raw_eeg))
+                    filtered_alpha = np.nan_to_num(filtfilt(self.b_alpha, self.a_alpha, raw_eeg), nan=0.0)
+                    filtered_beta = np.nan_to_num(filtfilt(self.b_beta, self.a_beta, raw_eeg), nan=0.0)
 
-                    alpha_power = float(np.mean(filtered_alpha ** 2))
-                    beta_power = float(np.mean(filtered_beta ** 2))
-                    ab_ratio = alpha_power / (beta_power + 1e-9)
+                    alpha_power = max(1e-9, float(np.mean(filtered_alpha ** 2)))
+                    beta_power = max(1e-9, float(np.mean(filtered_beta ** 2)))
+                    ab_ratio = float(alpha_power / (beta_power + 1e-9))
+                    if np.isnan(ab_ratio) or np.isinf(ab_ratio):
+                        ab_ratio = 1.0
 
                     self.ab_history = np.roll(self.ab_history, -1)
                     self.ab_history[-1] = ab_ratio
@@ -648,7 +652,7 @@ class ReceiverApp(tk.Tk):
                     unfocused_limit = UNFOCUSED_MULT * self.baseline_ratio
                     now = time.time()
 
-                    # 1. Immediate Unfocused State (used to accumulate percentages in the thin vertical bar)
+                    # 1. Immediate Unfocused State (drives vertical bar percentage)
                     self.is_instant_unfocused = bool(ab_ratio >= unfocused_limit)
                     self.is_instant_focused = not self.is_instant_unfocused
 
@@ -670,7 +674,7 @@ class ReceiverApp(tk.Tk):
                         text_color = ACCENT_GREEN
                         focus_status_text = "Focused"
 
-                    # 3. Sustained Focus Variables (10-second alert state passed to external scripts)
+                    # 3. Sustained Focus Variables (10-second alert state broadcasted to companion app)
                     self.is_sustained_unfocused = self.unfocused_alert_active
                     self.is_sustained_focused = not self.is_sustained_unfocused
                     self.is_focused = self.is_sustained_focused
@@ -678,7 +682,7 @@ class ReceiverApp(tk.Tk):
                     # 4. Accumulate Immediate Focus State for Vertical Bar
                     self.full_focus_history.append(1 if self.is_instant_focused else 0)
 
-                    # 5. Push 10-second Sustained Focus State to Outbound LSL Outlet
+                    # 5. Broadcast 10-second Sustained Focus State to Outbound LSL Outlet
                     if hasattr(self, 'focus_outlet') and self.focus_outlet:
                         self.focus_outlet.push_sample([1 if self.is_sustained_focused else 0])
 
@@ -705,7 +709,7 @@ class ReceiverApp(tk.Tk):
                     self.line_ab_ratio.set_ydata(self.ab_history)
                     self.line_baseline.set_ydata([self.baseline_ratio, self.baseline_ratio])
 
-                    # Render Thinner Vertical Focus Percentage Bar (Accumulates Immediate Focus State)
+                    # Render Ultra-Thin Vertical Focus Percentage Bar
                     total_samples = len(self.full_focus_history)
                     focused_pct = (sum(self.full_focus_history) / total_samples * 100.0) if total_samples > 0 else 100.0
                     unfocused_pct = 100.0 - focused_pct
@@ -715,31 +719,38 @@ class ReceiverApp(tk.Tk):
                     self.bar_red[0].set_y(focused_pct)
                     self.text_focus_pct.set_text(f"{focused_pct:.0f}%")
 
-                    a_min, a_max = float(np.min(filtered_alpha)), float(np.max(filtered_alpha))
-                    if a_max - a_min < 1e-3: a_min, a_max = a_min - 1.0, a_max + 1.0
+                    # Axis Autoscaling Protection
+                    a_min, a_max = float(np.nanmin(filtered_alpha)), float(np.nanmax(filtered_alpha))
+                    if np.isnan(a_min) or np.isnan(a_max) or a_max - a_min < 1e-3:
+                        a_min, a_max = a_min - 1.0, a_max + 1.0
                     self.ax_alpha.set_ylim(a_min * 1.15, a_max * 1.15)
 
-                    b_min, b_max = float(np.min(filtered_beta)), float(np.max(filtered_beta))
-                    if b_max - b_min < 1e-3: b_min, b_max = b_min - 1.0, b_max + 1.0
+                    b_min, b_max = float(np.nanmin(filtered_beta)), float(np.nanmax(filtered_beta))
+                    if np.isnan(b_min) or np.isnan(b_max) or b_max - b_min < 1e-3:
+                        b_min, b_max = b_min - 1.0, b_max + 1.0
                     self.ax_beta.set_ylim(b_min * 1.15, b_max * 1.15)
 
-                    ab_min, ab_max = float(np.min(self.ab_history)), float(np.max(self.ab_history))
-                    if ab_max - ab_min < 0.1: ab_min, ab_max = ab_min - 0.2, ab_max + 0.2
-                    self.ax_ab_ratio.set_ylim(max(0.0, ab_min * 0.9), ab_max * 1.15)
+                    ab_min = float(np.nanmin(self.ab_history)) if len(self.ab_history) > 0 else 0.0
+                    ab_max = float(np.nanmax(self.ab_history)) if len(self.ab_history) > 0 else 1.0
+                    if np.isnan(ab_min) or np.isnan(ab_max) or ab_max - ab_min < 0.1:
+                        ab_min, ab_max = 0.0, 2.0
+                    self.ax_ab_ratio.set_ylim(max(0.0, ab_min * 0.9), max(ab_min + 0.5, ab_max * 1.15))
 
                     alpha_mask = f_pos_a <= 40
-                    self.line_alpha_fft.set_data(f_pos_a[alpha_mask], P_pos_a[alpha_mask])
-                    self.marker_alpha_fft.set_data([alpha_freq], [alpha_amp])
-                    self.ax_alpha_fft.set_ylim(0, max(0.1, np.max(P_pos_a[alpha_mask]) * 1.15))
+                    if np.any(alpha_mask):
+                        self.line_alpha_fft.set_data(f_pos_a[alpha_mask], P_pos_a[alpha_mask])
+                        self.marker_alpha_fft.set_data([alpha_freq], [alpha_amp])
+                        self.ax_alpha_fft.set_ylim(0, max(0.1, float(np.nanmax(P_pos_a[alpha_mask])) * 1.15))
 
                     beta_mask = f_pos_b <= 40
-                    self.line_beta_fft.set_data(f_pos_b[beta_mask], P_pos_b[beta_mask])
-                    self.marker_beta_fft.set_data([beta_freq], [beta_amp])
-                    self.ax_beta_fft.set_ylim(0, max(0.1, np.max(P_pos_b[beta_mask]) * 1.15))
+                    if np.any(beta_mask):
+                        self.line_beta_fft.set_data(f_pos_b[beta_mask], P_pos_b[beta_mask])
+                        self.marker_beta_fft.set_data([beta_freq], [beta_amp])
+                        self.ax_beta_fft.set_ylim(0, max(0.1, float(np.nanmax(P_pos_b[beta_mask])) * 1.15))
 
                     self.canvas.draw_idle()
-
-        self._after_id = self.after(REDRAW_MS, self._update)
+        except Exception:
+            pass
 
     def on_close(self):
         try:
