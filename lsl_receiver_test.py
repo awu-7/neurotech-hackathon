@@ -9,7 +9,7 @@ import numpy as np
 from scipy.signal import butter, filtfilt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-from pylsl import StreamInlet, resolve_streams
+from pylsl import StreamInlet, StreamOutlet, StreamInfo, resolve_streams
 
 WINDOW_SECONDS = 5.0          # Sliding window length for signal analysis
 REDRAW_MS = 40                # ~25 FPS redraw timer
@@ -17,6 +17,17 @@ TILT_OFFSET_DEG = 25.0        # Allowed head posture deviation (+/- 25° from ca
 TILT_DURATION_SEC = 5.0       # Required continuous posture deviation duration (seconds)
 UNFOCUSED_MULT = 2.0          # Unfocused threshold multiplier (2.0x baseline)
 UNFOCUSED_DURATION_SEC = 15.0 # Continuous unfocused duration before alert (seconds)
+
+# Dark Theme Palette
+DARK_BG = "#0D0F12"
+CARD_BG = "#161920"
+CARD_BORDER = "#232834"
+ACCENT_CYAN = "#00E5FF"
+ACCENT_GREEN = "#00FF9D"
+ACCENT_AMBER = "#FFB300"
+ACCENT_RED = "#FF3366"
+TEXT_MAIN = "#F0F3F8"
+TEXT_MUTED = "#8C96A8"
 
 
 def find_peak(filtered_signal, srate, band_low, band_high):
@@ -49,10 +60,12 @@ def find_peak(filtered_signal, srate, band_low, band_high):
 class ReceiverApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("NeuroPawn Knight - Multimodal Cognitive & Posture System")
-        self.geometry("1200x920")
+        self.title("NeuroPawn Knight - Sleek Multimodal Studio")
+        self.geometry("1240x940")
+        self.configure(bg=DARK_BG)
 
         self.inlet = None
+        self.focus_outlet = None  # Outbound LSL Stream for NeuroLearn companion app
         self.srate = 250.0
         self.n_channels = 0
         self.labels = []
@@ -61,10 +74,12 @@ class ReceiverApp(tk.Tk):
         self.streams = []
         self._after_id = None
 
-        # Control States & Calibration Baselines
+        # State Variables
         self.is_paused = False
-        self.baseline_ratio = 1.0  # Default A/B ratio baseline
-        self.baseline_pitch = 0.0  # Calibrated average head pitch (degrees)
+        self.is_focused = True        # Live Focus State Variable
+        self.is_posture_good = True   # Live Posture State Variable
+        self.baseline_ratio = 1.0     # Default A/B ratio baseline
+        self.baseline_pitch = 0.0     # Calibrated average head pitch (degrees)
 
         # Calibration State Machine
         self.calib_state = None   # None, "COUNTDOWN", or "RECORDING"
@@ -92,48 +107,86 @@ class ReceiverApp(tk.Tk):
         self.results_file = None
         self.results_writer = None
 
+        self._setup_styles()
         self._build_ui()
+
+    # -- Custom Sleek Dark Theme Styling ------------------------------------
+    def _setup_styles(self):
+        style = ttk.Style(self)
+        style.theme_use('clam')
+
+        style.configure('.', background=DARK_BG, foreground=TEXT_MAIN)
+        style.configure('TFrame', background=DARK_BG)
+        style.configure('TLabel', background=DARK_BG, foreground=TEXT_MAIN, font=("Segoe UI", 10))
+        
+        # Button styling
+        style.configure(
+            'Dark.TButton',
+            background='#1F2430',
+            foreground=TEXT_MAIN,
+            bordercolor=CARD_BORDER,
+            borderwidth=1,
+            focuscolor='none',
+            padding=(10, 6),
+            font=("Segoe UI", 9, "bold")
+        )
+        style.map(
+            'Dark.TButton',
+            background=[('active', '#2A3142'), ('disabled', '#141720')],
+            foreground=[('disabled', '#525B6C')]
+        )
+
+        # Combobox styling
+        style.configure(
+            'TCombobox',
+            fieldbackground='#181C26',
+            background='#232836',
+            foreground=TEXT_MAIN,
+            arrowcolor=TEXT_MAIN,
+            bordercolor=CARD_BORDER
+        )
+        style.map('TCombobox', fieldbackground=[('readonly', '#181C26')])
 
     # -- UI Setup ----------------------------------------------------------
     def _build_ui(self):
+        # Top Header Bar
         top = ttk.Frame(self)
-        top.pack(side="top", fill="x", padx=6, pady=6)
+        top.pack(side="top", fill="x", padx=14, pady=10)
 
-        # Stream Selection & Connection
-        ttk.Label(top, text="Stream:").pack(side="left", padx=4)
+        ttk.Label(top, text="LSL STREAM", font=("Segoe UI", 9, "bold"), foreground=TEXT_MUTED).pack(side="left", padx=(4, 6))
         self.stream_var = tk.StringVar()
         self.stream_combo = ttk.Combobox(
-            top, textvariable=self.stream_var, width=24, state="readonly"
+            top, textvariable=self.stream_var, width=28, state="readonly"
         )
         self.stream_combo.pack(side="left", padx=4)
 
-        ttk.Button(top, text="Refresh", command=self.refresh_streams).pack(
-            side="left", padx=2
+        ttk.Button(top, text="Refresh", style="Dark.TButton", command=self.refresh_streams).pack(
+            side="left", padx=3
         )
         self.connect_btn = ttk.Button(
-            top, text="Connect", command=self.toggle_connect
+            top, text="Connect Stream", style="Dark.TButton", command=self.toggle_connect
         )
-        self.connect_btn.pack(side="left", padx=2)
+        self.connect_btn.pack(side="left", padx=3)
 
-        # Pause & Calibration Buttons
+        # Pause & Calibration Action Buttons
         self.pause_btn = ttk.Button(
-            top, text="Pause", command=self.toggle_pause, state="disabled"
+            top, text="Pause", style="Dark.TButton", command=self.toggle_pause, state="disabled"
         )
-        self.pause_btn.pack(side="left", padx=(10, 2))
+        self.pause_btn.pack(side="left", padx=(14, 3))
 
         self.calib_btn = ttk.Button(
-            top, text="Calibrate (10s)", command=self.start_calibration, state="disabled"
+            top, text="Calibrate (10s)", style="Dark.TButton", command=self.start_calibration, state="disabled"
         )
-        self.calib_btn.pack(side="left", padx=2)
+        self.calib_btn.pack(side="left", padx=3)
 
         # Quit Button
-        ttk.Button(top, text="Quit", command=self.on_close).pack(
-            side="right", padx=6
+        ttk.Button(top, text="Quit Application", style="Dark.TButton", command=self.on_close).pack(
+            side="right", padx=4
         )
 
-        # Real-Time Telemetry HUD Banner
-        hud_frame = tk.Frame(self, bg="#181818", bd=2, relief="groove")
-        hud_frame.pack(side="top", fill="x", padx=6, pady=(0, 2))
+        # Telemetry HUD Card
+        hud_frame = tk.Frame(self, bg=CARD_BG, bd=1, relief="solid", highlightbackground=CARD_BORDER, highlightthickness=1)
+        hud_frame.pack(side="top", fill="x", padx=14, pady=(0, 4))
 
         self.ratio_hud_var = tk.StringVar(
             value="Alpha/Beta Ratio: -- | Focus Index: -- | Baseline Ratio: 1.00"
@@ -142,16 +195,16 @@ class ReceiverApp(tk.Tk):
             hud_frame,
             textvariable=self.ratio_hud_var,
             font=("Consolas", 11, "bold"),
-            fg="#00FFCC",
-            bg="#181818",
-            padx=10,
-            pady=4
+            fg=ACCENT_CYAN,
+            bg=CARD_BG,
+            padx=14,
+            pady=8
         )
         self.hud_label.pack(side="left")
 
-        # Posture Alert Banner
-        posture_frame = tk.Frame(self, bg="#111111", bd=2, relief="sunken")
-        posture_frame.pack(side="top", fill="x", padx=6, pady=(0, 4))
+        # Posture Alert Card
+        posture_frame = tk.Frame(self, bg=CARD_BG, bd=1, relief="solid", highlightbackground=CARD_BORDER, highlightthickness=1)
+        posture_frame.pack(side="top", fill="x", padx=14, pady=(0, 8))
 
         self.posture_hud_var = tk.StringVar(
             value="Posture Status: Searching for IMU channels..."
@@ -160,23 +213,25 @@ class ReceiverApp(tk.Tk):
             posture_frame,
             textvariable=self.posture_hud_var,
             font=("Consolas", 11, "bold"),
-            fg="#AAAAAA",
-            bg="#111111",
-            padx=10,
-            pady=4
+            fg=TEXT_MUTED,
+            bg=CARD_BG,
+            padx=14,
+            pady=8
         )
         self.posture_label.pack(side="left")
 
-        self.status_var = tk.StringVar(value="Not connected.")
-        ttk.Label(self, textvariable=self.status_var).pack(
-            side="bottom", fill="x", padx=6, pady=2
+        # Bottom Status Bar
+        self.status_var = tk.StringVar(value="System Ready. Connect an LSL stream to begin.")
+        status_bar = tk.Label(
+            self, textvariable=self.status_var, font=("Segoe UI", 9), fg=TEXT_MUTED, bg="#08090C", anchor="w", padx=14, pady=4
         )
+        status_bar.pack(side="bottom", fill="x")
 
         # Figure GridSpec Setup
-        self.fig = Figure(figsize=(10, 6.8), dpi=100)
+        self.fig = Figure(figsize=(10, 6.8), dpi=100, facecolor=DARK_BG)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(
-            side="top", fill="both", expand=True, padx=6, pady=6
+            side="top", fill="both", expand=True, padx=14, pady=(0, 8)
         )
 
         self.refresh_streams()
@@ -197,7 +252,7 @@ class ReceiverApp(tk.Tk):
                 0,
             )
             self.stream_combo.current(idx)
-        self.status_var.set(f"Found {len(names)} stream(s).")
+        self.status_var.set(f"Found {len(names)} stream(s) broadcasting on local LSL.")
 
     # -- Connection & IMU Detection ----------------------------------------
     def toggle_pause(self):
@@ -229,6 +284,10 @@ class ReceiverApp(tk.Tk):
         self.srate = full.nominal_srate() if full.nominal_srate() > 0 else 250.0
         self.labels = self._read_labels(full, self.n_channels)
 
+        # Initialize Outbound LSL Stream for NeuroLearn companion app
+        focus_info = StreamInfo('NeuroPawnFocus', 'FocusState', 1, 0, 'int32', 'focus_stream_01')
+        self.focus_outlet = StreamOutlet(focus_info)
+
         # Detect Accelerometer Channels for Head Posture (+X Axis)
         self.acc_x_idx = self._find_channel_index(["ACC_X", "ACCEL_X", "AX"], fallback=8 if self.n_channels >= 11 else None)
         self.acc_y_idx = self._find_channel_index(["ACC_Y", "ACCEL_Y", "AY"], fallback=9 if self.n_channels >= 11 else None)
@@ -238,6 +297,8 @@ class ReceiverApp(tk.Tk):
         self.tilt_alert_active = False
         self.unfocused_start_time = None
         self.unfocused_alert_active = False
+        self.is_focused = True
+        self.is_posture_good = True
 
         n_samples = max(1, int(self.srate * WINDOW_SECONDS))
         self.buffer = np.zeros((self.n_channels, n_samples), dtype=np.float64)
@@ -269,13 +330,13 @@ class ReceiverApp(tk.Tk):
         ])
 
         self._build_axes()
-        self.connect_btn.configure(text="Disconnect")
+        self.connect_btn.configure(text="Disconnect Stream")
         self.pause_btn.configure(state="normal")
         self.calib_btn.configure(state="normal")
         
         imu_status = "IMU Active" if self.acc_x_idx is not None else "No IMU detected"
         self.status_var.set(
-            f"Connected to {info.name()} - {self.n_channels} ch @ {self.srate:.0f} Hz ({imu_status})."
+            f"Connected: {info.name()} - {self.n_channels} ch @ {self.srate:.0f} Hz ({imu_status}). Outbound LSL stream initialized."
         )
         self._after_id = self.after(REDRAW_MS, self._update)
 
@@ -291,20 +352,23 @@ class ReceiverApp(tk.Tk):
                 pass
             self.inlet = None
 
+        if hasattr(self, 'focus_outlet') and self.focus_outlet:
+            self.focus_outlet = None
+
         if self.log_file and not self.log_file.closed:
             self.log_file.close()
         if self.results_file and not self.results_file.closed:
             self.results_file.close()
 
-        self.connect_btn.configure(text="Connect")
+        self.connect_btn.configure(text="Connect Stream")
         self.pause_btn.configure(text="Pause", state="disabled")
         self.calib_btn.configure(state="disabled")
         self.is_paused = False
-        self.status_var.set("Disconnected. Logs saved to /log directory.")
-        self.hud_label.configure(fg="#00FFCC")
+        self.status_var.set("Disconnected. Logs written to /log directory.")
+        self.hud_label.configure(fg=ACCENT_CYAN)
         self.ratio_hud_var.set("Alpha/Beta Ratio: -- | Focus Index: -- | Baseline Ratio: 1.00")
         self.posture_hud_var.set("Posture Status: Not connected.")
-        self.posture_label.configure(fg="#AAAAAA")
+        self.posture_label.configure(fg=TEXT_MUTED)
 
     def _find_channel_index(self, target_keywords, fallback=None):
         for idx, label in enumerate(self.labels):
@@ -341,57 +405,49 @@ class ReceiverApp(tk.Tk):
         self.calibration_pitch_samples = []
         self.is_calibrating = False
 
-        # Fullscreen Calibration Window
         self.calib_win = tk.Toplevel(self)
         self.calib_win.title("Baseline Focus & Posture Calibration")
         self.calib_win.attributes("-fullscreen", True)
-        self.calib_win.configure(bg="#0A0A0A")
+        self.calib_win.configure(bg="#060709")
         self.calib_win.transient(self)
         self.calib_win.grab_set()
 
-        # Exit calibration shortcut
         self.calib_win.bind("<Escape>", lambda e: self.cancel_calibration())
 
-        # Top Control / Exit Bar
-        top_bar = tk.Frame(self.calib_win, bg="#0A0A0A")
-        top_bar.pack(side="top", fill="x", padx=20, pady=20)
+        top_bar = tk.Frame(self.calib_win, bg="#060709")
+        top_bar.pack(side="top", fill="x", padx=30, pady=30)
         tk.Button(
             top_bar, text="Exit Fullscreen (Esc)", command=self.cancel_calibration,
-            bg="#222222", fg="#AAAAAA", bd=1, font=("Arial", 10)
+            bg="#181B24", fg=TEXT_MUTED, bd=0, font=("Segoe UI", 10, "bold"), padx=12, pady=6
         ).pack(side="right")
 
-        # Instruction Text Label (ONLY shown during countdown)
         self.calib_lbl_instruction = tk.Label(
             self.calib_win, 
             text="Focus your gaze on the cross in the center", 
-            font=("Arial", 22, "bold"), 
-            fg="#FFCC00", 
-            bg="#0A0A0A"
+            font=("Segoe UI", 24, "bold"), 
+            fg=ACCENT_AMBER, 
+            bg="#060709"
         )
         self.calib_lbl_instruction.pack(pady=(40, 10))
 
-        # Central Cross (+) Target
-        canvas_size = 240
+        canvas_size = 260
         canvas = tk.Canvas(
             self.calib_win, width=canvas_size, height=canvas_size, 
-            bg="#0A0A0A", highlightthickness=0
+            bg="#060709", highlightthickness=0
         )
         canvas.pack(expand=True)
 
         cx, cy = canvas_size // 2, canvas_size // 2
-        arm_len = 50
-        # Horizontal cross line
-        canvas.create_line(cx - arm_len, cy, cx + arm_len, cy, fill="#00FFCC", width=5)
-        # Vertical cross line
-        canvas.create_line(cx, cy - arm_len, cx, cy + arm_len, fill="#00FFCC", width=5)
+        arm_len = 55
+        canvas.create_line(cx - arm_len, cy, cx + arm_len, cy, fill=ACCENT_CYAN, width=5)
+        canvas.create_line(cx, cy - arm_len, cx, cy + arm_len, fill=ACCENT_CYAN, width=5)
 
-        # Status / Countdown Timer Label
         self.calib_timer_lbl = tk.Label(
             self.calib_win, 
             text="Starting in 3...", 
-            font=("Consolas", 18, "bold"), 
-            fg="#FFFFFF", 
-            bg="#0A0A0A"
+            font=("Consolas", 20, "bold"), 
+            fg=TEXT_MAIN, 
+            bg="#060709"
         )
         self.calib_timer_lbl.pack(pady=(10, 60))
 
@@ -416,7 +472,6 @@ class ReceiverApp(tk.Tk):
                 self.calib_state = "RECORDING"
                 self.calib_timer_start = now
                 self.is_calibrating = True
-                # Remove the instruction label so it ONLY shows during the countdown
                 self.calib_lbl_instruction.pack_forget()
 
         elif self.calib_state == "RECORDING":
@@ -446,69 +501,77 @@ class ReceiverApp(tk.Tk):
                     f"Allowed Posture Range: {self.baseline_pitch - TILT_OFFSET_DEG:.1f}° to {self.baseline_pitch + TILT_OFFSET_DEG:.1f}°"
                 )
 
-    # -- Subplot Layout Setup ----------------------------------------------
+    # -- Subplot Layout Setup (Dark Mode Matplotlib) -----------------------
     def _build_axes(self):
         self.fig.clear()
         
-        # GridSpec: 3 rows layout (Top: EEG Bands, Middle: Live A/B Ratio, Bottom: FFT Power Spectrums)
-        gs = self.fig.add_gridspec(3, 2, height_ratios=[2.2, 1.6, 1.8], hspace=0.45, wspace=0.22)
+        gs = self.fig.add_gridspec(3, 2, height_ratios=[2.2, 1.6, 1.8], hspace=0.48, wspace=0.22)
 
         self.ax_alpha = self.fig.add_subplot(gs[0, 0])
         self.ax_beta = self.fig.add_subplot(gs[0, 1])
-        self.ax_ab_ratio = self.fig.add_subplot(gs[1, :])  # Spans across both columns
+        self.ax_ab_ratio = self.fig.add_subplot(gs[1, :])
         self.ax_alpha_fft = self.fig.add_subplot(gs[2, 0])
         self.ax_beta_fft = self.fig.add_subplot(gs[2, 1])
+
+        axes_list = [self.ax_alpha, self.ax_beta, self.ax_ab_ratio, self.ax_alpha_fft, self.ax_beta_fft]
+        for ax in axes_list:
+            ax.set_facecolor(CARD_BG)
+            ax.xaxis.label.set_color(TEXT_MUTED)
+            ax.yaxis.label.set_color(TEXT_MUTED)
+            ax.title.set_color(TEXT_MAIN)
+            ax.tick_params(colors=TEXT_MUTED, labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_color(CARD_BORDER)
 
         n_samples = self.buffer.shape[1]
         t = np.linspace(-WINDOW_SECONDS, 0, n_samples)
         target_ch_name = self.labels[0]
 
-        # Time-Domain EEG Subplots (Autoscaling)
-        (self.line_alpha,) = self.ax_alpha.plot(t, np.zeros(n_samples), color='gold', linewidth=1.0)
-        self.ax_alpha.set_title(f"Alpha Band (8–13 Hz) - {target_ch_name}", fontsize=9)
+        # Time-Domain EEG Subplots
+        (self.line_alpha,) = self.ax_alpha.plot(t, np.zeros(n_samples), color='#FFD700', linewidth=1.1)
+        self.ax_alpha.set_title(f"Alpha Band (8–13 Hz) - {target_ch_name}", fontsize=9, fontweight='bold')
         self.ax_alpha.set_xlabel("Time (s)", fontsize=7)
         self.ax_alpha.set_ylabel("uV", fontsize=7)
         self.ax_alpha.set_xlim(-WINDOW_SECONDS, 0)
 
-        (self.line_beta,) = self.ax_beta.plot(t, np.zeros(n_samples), color='magenta', linewidth=1.0)
-        self.ax_beta.set_title(f"Beta Band (13–30 Hz) - {target_ch_name}", fontsize=9)
+        (self.line_beta,) = self.ax_beta.plot(t, np.zeros(n_samples), color='#E040FB', linewidth=1.1)
+        self.ax_beta.set_title(f"Beta Band (13–30 Hz) - {target_ch_name}", fontsize=9, fontweight='bold')
         self.ax_beta.set_xlabel("Time (s)", fontsize=7)
         self.ax_beta.set_ylabel("uV", fontsize=7)
         self.ax_beta.set_xlim(-WINDOW_SECONDS, 0)
 
-        # Live Alpha/Beta Ratio Scrolling Graph
-        (self.line_ab_ratio,) = self.ax_ab_ratio.plot(t, np.zeros(n_samples), color='#00FFCC', linewidth=1.2)
-        self.line_baseline = self.ax_ab_ratio.axhline(self.baseline_ratio, color='#FFCC00', linestyle='--', linewidth=1.0, label='Baseline')
-        self.ax_ab_ratio.set_title("Live Alpha / Beta Ratio Stream", fontsize=9, fontweight='bold', color='#00FFCC')
+        # Live Alpha/Beta Ratio Stream Subplot
+        (self.line_ab_ratio,) = self.ax_ab_ratio.plot(t, np.zeros(n_samples), color=ACCENT_CYAN, linewidth=1.3)
+        self.line_baseline = self.ax_ab_ratio.axhline(self.baseline_ratio, color=ACCENT_AMBER, linestyle='--', linewidth=1.1, label='Baseline')
+        self.ax_ab_ratio.set_title("Live Alpha / Beta Ratio Telemetry", fontsize=9, fontweight='bold', color=ACCENT_CYAN)
         self.ax_ab_ratio.set_xlabel("Time (s)", fontsize=7)
         self.ax_ab_ratio.set_ylabel("A/B Ratio", fontsize=7)
         self.ax_ab_ratio.set_xlim(-WINDOW_SECONDS, 0)
-        self.ax_ab_ratio.grid(True, linestyle=':', alpha=0.4)
+        self.ax_ab_ratio.grid(True, linestyle=':', color=CARD_BORDER, alpha=0.6)
 
-        # Power Spectrum / FFT Subplots (Autoscaling)
-        (self.line_alpha_fft,) = self.ax_alpha_fft.plot([], [], color='cyan', linewidth=1.0)
-        (self.marker_alpha_fft,) = self.ax_alpha_fft.plot([], [], 'ro', markersize=4)
+        # Power Spectrum / FFT Subplots
+        (self.line_alpha_fft,) = self.ax_alpha_fft.plot([], [], color=ACCENT_CYAN, linewidth=1.0)
+        (self.marker_alpha_fft,) = self.ax_alpha_fft.plot([], [], 'ro', color=ACCENT_RED, markersize=4)
         self.ax_alpha_fft.set_title("Alpha Power Spectrum", fontsize=8)
         self.ax_alpha_fft.set_xlabel("Hz", fontsize=7)
         self.ax_alpha_fft.set_ylabel("Mag", fontsize=7)
-        self.ax_alpha_fft.tick_params(labelsize=7)
         self.ax_alpha_fft.set_xlim(0, 40)
 
-        (self.line_beta_fft,) = self.ax_beta_fft.plot([], [], color='cyan', linewidth=1.0)
-        (self.marker_beta_fft,) = self.ax_beta_fft.plot([], [], 'ro', markersize=4)
+        (self.line_beta_fft,) = self.ax_beta_fft.plot([], [], color=ACCENT_CYAN, linewidth=1.0)
+        (self.marker_beta_fft,) = self.ax_beta_fft.plot([], [], 'ro', color=ACCENT_RED, markersize=4)
         self.ax_beta_fft.set_title("Beta Power Spectrum", fontsize=8)
         self.ax_beta_fft.set_xlabel("Hz", fontsize=7)
         self.ax_beta_fft.set_ylabel("Mag", fontsize=7)
-        self.ax_beta_fft.tick_params(labelsize=7)
         self.ax_beta_fft.set_xlim(0, 40)
 
         self.canvas.draw()
 
-    # -- Process Posture Deviation relative to Calibrated Baseline (+/- 25°) -
+    # -- Process Posture & Store `is_posture_good` Variable ---------------
     def _process_posture(self):
         if self.acc_x_idx is None or self.acc_x_idx >= self.n_channels:
+            self.is_posture_good = True
             self.posture_hud_var.set("Posture Status: IMU Accelerometer channels unavailable.")
-            self.posture_label.configure(fg="#AAAAAA")
+            self.posture_label.configure(fg=TEXT_MUTED)
             return
 
         ax_val = self.buffer[self.acc_x_idx, -1]
@@ -538,23 +601,26 @@ class ReceiverApp(tk.Tk):
             elapsed = now - self.tilt_start_time
             if elapsed >= TILT_DURATION_SEC:
                 self.tilt_alert_active = True
+                self.is_posture_good = False  # STORED VARIABLE: Posture alert active
                 self.posture_hud_var.set(
                     f"⚠️ POOR POSTURE ALERT: Head tilted {tilt_dir} >25° from baseline for {elapsed:.1f}s! (Tilt: {self.current_pitch_deg:.1f}°, Base: {self.baseline_pitch:.1f}°)"
                 )
-                self.posture_label.configure(fg="#FF2222")
+                self.posture_label.configure(fg=ACCENT_RED)
             else:
                 self.tilt_alert_active = False
+                self.is_posture_good = True   # STORED VARIABLE: Tilt pending
                 self.posture_hud_var.set(
                     f"Posture Warning Pending... Tilted {tilt_dir} ({self.current_pitch_deg:.1f}°) for {elapsed:.1f}s / {TILT_DURATION_SEC:.0f}s"
                 )
-                self.posture_label.configure(fg="#FFAA00")
+                self.posture_label.configure(fg=ACCENT_AMBER)
         else:
             self.tilt_start_time = None
             self.tilt_alert_active = False
+            self.is_posture_good = True       # STORED VARIABLE: Posture is good
             self.posture_hud_var.set(
                 f"Posture Status: Good (Pitch: {self.current_pitch_deg:.1f}°, Baseline: {self.baseline_pitch:.1f}°, Range: {min_pitch_limit:.1f}° to {max_pitch_limit:.1f}°)"
             )
-            self.posture_label.configure(fg="#00FF66")
+            self.posture_label.configure(fg=ACCENT_GREEN)
 
     # -- Main Processing & UI Redraw Loop ----------------------------------
     def _update(self):
@@ -617,17 +683,24 @@ class ReceiverApp(tk.Tk):
                         unfocused_elapsed = now - self.unfocused_start_time
                         if unfocused_elapsed >= UNFOCUSED_DURATION_SEC:
                             self.unfocused_alert_active = True
-                            text_color = "#FF2222"
+                            text_color = ACCENT_RED
                             focus_status_text = "⚠️ UNFOCUSED ALERT (>15s above 2.0x baseline!)"
                         else:
                             self.unfocused_alert_active = False
-                            text_color = "#FFAA00"
+                            text_color = ACCENT_AMBER
                             focus_status_text = f"Unfocused Pending ({unfocused_elapsed:.1f}s / {UNFOCUSED_DURATION_SEC:.0f}s)"
                     else:
                         self.unfocused_start_time = None
                         self.unfocused_alert_active = False
-                        text_color = "#00FF66"
+                        text_color = ACCENT_GREEN
                         focus_status_text = "Focused"
+
+                    # STORED VARIABLE: `is_focused`
+                    self.is_focused = not self.unfocused_alert_active
+
+                    # Outbound LSL stream broadcast (1 = Focused, 0 = Unfocused Alert)
+                    if hasattr(self, 'focus_outlet') and self.focus_outlet:
+                        self.focus_outlet.push_sample([1 if self.is_focused else 0])
 
                     # Peak Frequencies & Amplitudes
                     f_pos_a, P_pos_a, alpha_freq, alpha_amp = find_peak(
