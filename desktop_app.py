@@ -1,3 +1,4 @@
+
 import time
 import json
 import queue
@@ -8,26 +9,21 @@ import pyautogui
 from bridge import start_bridge, send_command
 from sync_logging import get_logger
 
-
 log = get_logger("desktop")
-
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
-
 
 app = ctk.CTk()
 app.title("NeuroLearn")
 app.geometry("680x590")
 app.resizable(False, False)
 
-
 running = False
 focused = True
 unfocused_start = 0
 unfocused_seconds = 0
 pending_rewind = 0
-
 
 # Flask is the source of truth for UI focus text.
 STATUS_URL = "http://127.0.0.1:5001/api/status"
@@ -40,8 +36,6 @@ last_log_status = None
 last_connection_status = None
 
 
-
-
 def _send_network_event(item):
     try:
         network_events.put_nowait(item)
@@ -51,8 +45,6 @@ def _send_network_event(item):
         except queue.Empty:
             pass
         network_events.put_nowait(item)
-
-
 
 
 def _poll_server():
@@ -67,8 +59,6 @@ def _poll_server():
         stop_network.wait(0.3)
 
 
-
-
 def _process_network_events():
     global current_status, current_display, last_live_revision, last_log_status, last_connection_status
     newest = None
@@ -77,7 +67,6 @@ def _process_network_events():
             newest = network_events.get_nowait()
     except queue.Empty:
         pass
-
 
     if newest:
         kind, payload = newest
@@ -131,10 +120,7 @@ def _process_network_events():
                         set_focused()
         update_screen()
 
-
     app.after(100, _process_network_events)
-
-
 
 
 def update_screen():
@@ -147,8 +133,6 @@ def update_screen():
     }
     status_label.configure(text=current_display, text_color=colors[current_status])
     seconds_label.configure(text=f"{unfocused_seconds} seconds")
-
-
 
 
 def start_session():
@@ -166,8 +150,6 @@ def start_session():
     update_screen()
 
 
-
-
 def set_unfocused():
     global focused, unfocused_start, unfocused_seconds
     if not running or not focused:
@@ -179,8 +161,6 @@ def set_unfocused():
     send_command("distracted")
     message_label.configure(text="Unfocused detected. Tracking time...")
     update_screen()
-
-
 
 
 def set_focused():
@@ -205,16 +185,12 @@ def set_focused():
     update_screen()
 
 
-
-
 def simulate_unfocused():
     # Demonstrates session behavior, but cannot overwrite the live EEG label.
     if not running:
         message_label.configure(text="Click Start Session first.")
         return
     set_unfocused()
-
-
 
 
 def simulate_focused():
@@ -224,16 +200,12 @@ def simulate_focused():
     set_focused()
 
 
-
-
 def update_timer():
     global unfocused_seconds
     if running and not focused:
         unfocused_seconds = int((time.monotonic() - unfocused_start) // 5) * 5
         update_screen()
     app.after(250, update_timer)
-
-
 
 
 def continue_lecture():
@@ -245,45 +217,34 @@ def continue_lecture():
     send_command("discard")
 
 
-
-
 def send_rewind(seconds):
     original_speed = float(speed_var.get().replace("x", ""))
-
 
     # Rewind the video
     presses = max(1, seconds // 5)
     pyautogui.press("left", presses=presses, interval=0.2)
 
-
     # Don't slow down below 0.25x
     if original_speed <= 0.25:
         return
 
-
     # Slow down by 0.25x
     pyautogui.hotkey("shift", ",")
 
-
     slower_speed = original_speed - 0.25
-
 
     # Calculate how long replay should take
     replay_time = (presses * 5) / slower_speed
 
-
     # Restore the original speed
     app.after(int(replay_time * 1000),lambda: pyautogui.hotkey("shift", "."))
-
 
 def rewind_lecture():
     global pending_rewind
 
-
     seconds = pending_rewind
     if seconds == 0:
         return
-
 
     pending_rewind = 0
     rewind_button.configure(state="disabled")
@@ -292,11 +253,8 @@ def rewind_lecture():
         text="Switch to your video using Alt+Tab. Rewinding in 5 seconds!"
     )
 
-
     send_command("rewind")
     app.after(5000, lambda: send_rewind(seconds))
-
-
 
 
 header = ctk.CTkLabel(
@@ -306,7 +264,6 @@ header = ctk.CTkLabel(
 )
 header.pack(pady=(24, 3))
 
-
 subtitle = ctk.CTkLabel(
     app,
     text="EEG lecture companion | Flask live sync",
@@ -314,16 +271,13 @@ subtitle = ctk.CTkLabel(
 )
 subtitle.pack(pady=(0, 8))
 
-
 connection_label = ctk.CTkLabel(
     app, text="Flask server: connecting...", text_color="#FFB86C"
 )
 connection_label.pack(pady=(0, 8))
 
-
 card = ctk.CTkFrame(app, corner_radius=16)
 card.pack(fill="x", padx=32, pady=8)
-
 
 status_heading = ctk.CTkLabel(
     card,
@@ -332,14 +286,12 @@ status_heading = ctk.CTkLabel(
 )
 status_heading.pack(pady=(20, 4))
 
-
 status_label = ctk.CTkLabel(
     card,
     text="Session not started",
     font=ctk.CTkFont(size=25, weight="bold")
 )
 status_label.pack()
-
 
 seconds_heading = ctk.CTkLabel(
     card,
@@ -348,14 +300,12 @@ seconds_heading = ctk.CTkLabel(
 )
 seconds_heading.pack(pady=(12, 2))
 
-
 seconds_label = ctk.CTkLabel(
     card,
     text="0 seconds",
     font=ctk.CTkFont(size=25, weight="bold")
 )
 seconds_label.pack(pady=(0, 20))
-
 
 start_button = ctk.CTkButton(
     app,
@@ -366,10 +316,8 @@ start_button = ctk.CTkButton(
 )
 start_button.pack(pady=(10, 18))
 
-
 button_row = ctk.CTkFrame(app, fg_color="transparent")
 button_row.pack(pady=(0, 16))
-
 
 unfocused_button = ctk.CTkButton(
     button_row,
@@ -382,7 +330,6 @@ unfocused_button = ctk.CTkButton(
 )
 unfocused_button.pack(side="left", padx=8)
 
-
 focused_button = ctk.CTkButton(
     button_row,
     text="Simulate Focused",
@@ -394,10 +341,8 @@ focused_button = ctk.CTkButton(
 )
 focused_button.pack(side="left", padx=8)
 
-
 prompt_card = ctk.CTkFrame(app, corner_radius=16)
 prompt_card.pack(fill="x", padx=32, pady=5)
-
 
 message_label = ctk.CTkLabel(
     prompt_card,
@@ -406,13 +351,11 @@ message_label = ctk.CTkLabel(
 )
 message_label.pack(pady=(16, 10), padx=15)
 
-
 prompt_buttons = ctk.CTkFrame(
     prompt_card,
     fg_color="transparent"
 )
 prompt_buttons.pack(pady=(0, 15))
-
 
 rewind_button = ctk.CTkButton(
     prompt_buttons,
@@ -422,7 +365,6 @@ rewind_button = ctk.CTkButton(
     state="disabled"
 )
 rewind_button.pack(side="left", padx=8)
-
 
 continue_button = ctk.CTkButton(
     prompt_buttons,
@@ -435,9 +377,7 @@ continue_button = ctk.CTkButton(
 )
 continue_button.pack(side="left", padx=8)
 
-
 speed_var = ctk.StringVar(value="1.75x")
-
 
 speed_menu = ctk.CTkOptionMenu(
     app,
@@ -446,14 +386,11 @@ speed_menu = ctk.CTkOptionMenu(
     variable=speed_var
 )
 
-
 speed_menu.pack(pady=10)
-
 
 def on_close():
     stop_network.set()
     app.destroy()
-
 
 app.protocol("WM_DELETE_WINDOW", on_close)
 update_timer()

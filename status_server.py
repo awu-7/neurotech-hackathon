@@ -6,11 +6,9 @@ import time
 from flask import Flask, jsonify, request
 from sync_logging import get_logger
 
-
 log = get_logger("server")
 _last_status = None
 _last_report = 0.0
-
 
 app = Flask(__name__)
 lock = threading.Lock()
@@ -18,11 +16,9 @@ state = {"status": "Waiting for EEG", "display": "Waiting for EEG", "ratio": Non
          "baseline": None, "updated_at": None, "revision": 0}
 VALID = {"focused", "pending", "unfocused"}
 
-
 @app.get("/health")
 def health():
     return jsonify(ok=True, service="NeuroLearn EEG status server")
-
 
 @app.route("/api/status", methods=["GET", "POST"])
 def eeg_status():
@@ -46,12 +42,10 @@ def eeg_status():
             _last_report = now
         return jsonify(result)
 
-
     with lock:
         result = dict(state)
     result["live"] = result["updated_at"] is not None and time.time() - result["updated_at"] < 3.0
     return jsonify(result)
-
 
 if __name__ == "__main__":
     log.info("SERVER STARTING http://127.0.0.1:5001 | health=/health | status=/api/status")
