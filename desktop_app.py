@@ -1,10 +1,12 @@
-
 import time
 import json
 import queue
 import threading
 from urllib.request import urlopen
 import customtkinter as ctk
+
+import serial
+import serial.tools.list_ports
 
 from bridge import start_bridge, send_command
 from sync_logging import get_logger
@@ -23,6 +25,43 @@ running = False
 focused = True
 unfocused_start = 0
 unfocused_seconds = 0
+
+# Raspberry Pi Pico USB Serial Handle
+pico_ser = None
+
+
+def init_pico_serial(default_port="COM8", baudrate=115200):
+    """Attempts to auto-detect or connect to the Raspberry Pi Pico over USB serial."""
+    global pico_ser
+    pico_port = None
+    
+    # Auto-detect Pico port if possible
+    ports = list(serial.tools.list_ports.comports())
+    for port in ports:
+        if any(term in port.description for term in ["Pico", "Board in FS Mode", "USB Serial Device", "ttyACM"]):
+            pico_port = port.device
+            break
+
+    if not pico_port:
+        pico_port = default_port
+
+    try:
+        pico_ser = serial.Serial(pico_port, baudrate, timeout=0.1)
+        log.info("PICO SERIAL | Connected on %s", pico_port)
+    except Exception as e:
+        log.warning("PICO SERIAL | Connection failed on %s: %s", pico_port, e)
+        pico_ser = None
+
+
+def send_to_pico(status, pitch=0.0):
+    """Sends JSON telemetry over USB serial to the Raspberry Pi Pico."""
+    global pico_ser
+    if pico_ser and pico_ser.is_open:
+        try:
+            payload = json.dumps({"status": status, "pitch": round(float(pitch), 1)}) + "\n"
+            pico_ser.write(payload.encode('utf-8'))
+        except Exception as e:
+            log.error("PICO SERIAL WRITE ERROR | %s", e)
 
 
 # Flask is the source of truth for UI focus text.
@@ -81,6 +120,8 @@ def _process_network_events():
             current_status = "waiting"
             current_display = "Server offline"
             last_live_revision = None
+            send_to_pico("offline", 0.0)
+
         elif not payload.get("live"):
             if last_connection_status != "waiting":
                 log.warning("SERVER ONLINE but EEG data STALE / WAITING for test.py")
@@ -92,6 +133,8 @@ def _process_network_events():
             current_status = "waiting"
             current_display = "Waiting for EEG"
             last_live_revision = None
+            send_to_pico("waiting", 0.0)
+
         else:
             if last_connection_status != "live":
                 log.info("SERVER ONLINE | EEG LIVE")
@@ -101,15 +144,21 @@ def _process_network_events():
                 text_color="#55D6A0"
             )
             status = payload.get("status", "waiting")
+            pitch = payload.get("pitch", 0.0)
+
             if status not in ("focused", "pending", "unfocused"):
                 status = "waiting"
             current_display = payload.get("display", status)
             current_status = status
+
+            # Stream telemetry payload directly to Raspberry Pi Pico
+            send_to_pico(status, pitch)
+
             if status != last_log_status:
                 log.info("DISPLAY UPDATED | revision=%s status=%s text=%r", payload.get("revision"), status, current_display)
                 last_log_status = status
+
             # Update distraction tracking on status TRANSITIONS only.
-            # Pending and Alert are both displayed as unfocused states.
             revision = payload.get("revision")
             if revision != last_live_revision:
                 last_live_revision = revision
@@ -169,7 +218,6 @@ def set_focused():
         return
 
     unfocused_seconds = int(time.monotonic() - unfocused_start)
-
     focused = True
 
     log.info(
@@ -183,20 +231,15 @@ def set_focused():
         message_label.configure(
             text="Focus returned. Check YouTube for the rewind popup."
         )
-
         send_command("prompt_rewind")
-
     else:
         message_label.configure(
             text="Short distraction. No rewind needed."
         )
-
         send_command("discard")
 
     unfocused_seconds = 0
     update_screen()
-
-
 
 
 def update_timer():
@@ -205,8 +248,6 @@ def update_timer():
         unfocused_seconds = int((time.monotonic() - unfocused_start) // 5) * 5
         update_screen()
     app.after(250, update_timer)
-
-
 
 
 header = ctk.CTkLabel(
@@ -268,10 +309,6 @@ start_button = ctk.CTkButton(
 )
 start_button.pack(pady=(10, 18))
 
-
-
-
-
 prompt_card = ctk.CTkFrame(app, corner_radius=16)
 prompt_card.pack(fill="x", padx=32, pady=5)
 
@@ -285,9 +322,19 @@ message_label.pack(pady=(16, 10), padx=15)
 
 def on_close():
     stop_network.set()
+    if pico_ser and pico_ser.is_open:
+        try:
+            pico_ser.close()
+        except Exception:
+            pass
     app.destroy()
 
+
 app.protocol("WM_DELETE_WINDOW", on_close)
+
+# Initialize Serial Connection to Raspberry Pi Pico
+init_pico_serial(default_port="COM8")
+
 update_timer()
 start_bridge()
 log.info("DESKTOP STARTING | polling %s", STATUS_URL)
