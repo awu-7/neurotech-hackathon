@@ -13,10 +13,10 @@ from pylsl import StreamInlet, resolve_streams
 
 WINDOW_SECONDS = 5.0          # Sliding window length for signal analysis
 REDRAW_MS = 40                # ~25 FPS redraw timer
-TILT_THRESHOLD_DEG = 25.0     # Tilt angle threshold (+25° forward, -25° backward)
-TILT_DURATION_SEC = 5.0       # Required continuous duration threshold for posture (seconds)
-UNFOCUSED_MULT = 2.0          # Unfocused threshold (2.0x baseline)
-UNFOCUSED_DURATION_SEC = 15.0 # Continuous unfocused time before warning (seconds)
+TILT_OFFSET_DEG = 25.0        # Allowed head posture deviation (+/- 25° from calibrated baseline)
+TILT_DURATION_SEC = 5.0       # Required continuous posture deviation duration (seconds)
+UNFOCUSED_MULT = 2.0          # Unfocused threshold multiplier (2.0x baseline)
+UNFOCUSED_DURATION_SEC = 15.0 # Continuous unfocused duration before alert (seconds)
 
 
 def find_peak(filtered_signal, srate, band_low, band_high):
@@ -49,26 +49,29 @@ def find_peak(filtered_signal, srate, band_low, band_high):
 class ReceiverApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("NeuroPawn Knight - LSL Cognitive Load & Posture Analyzer")
-        self.geometry("1180x880")
+        self.title("NeuroPawn Knight - Multimodal Cognitive & Posture System")
+        self.geometry("1200x920")
 
         self.inlet = None
         self.srate = 250.0
         self.n_channels = 0
         self.labels = []
         self.buffer = None       # shape (n_channels, n_samples)
+        self.ab_history = None   # shape (n_samples,) for live A/B ratio graph
         self.streams = []
         self._after_id = None
 
-        # Control States
+        # Control States & Calibration Baselines
         self.is_paused = False
-        self.baseline_ratio = 1.0  # Default threshold baseline
+        self.baseline_ratio = 1.0  # Default A/B ratio baseline
+        self.baseline_pitch = 0.0  # Calibrated average head pitch (degrees)
 
         # Calibration State Machine
         self.calib_state = None   # None, "COUNTDOWN", or "RECORDING"
         self.calib_timer_start = 0.0
         self.is_calibrating = False
         self.calibration_samples = []
+        self.calibration_pitch_samples = []
         self.calib_win = None
 
         # Focus Tracker State
@@ -119,17 +122,9 @@ class ReceiverApp(tk.Tk):
         self.pause_btn.pack(side="left", padx=(10, 2))
 
         self.calib_btn = ttk.Button(
-            top, text="Calibrate (Eyes Closed)", command=self.start_calibration, state="disabled"
+            top, text="Calibrate (10s)", command=self.start_calibration, state="disabled"
         )
         self.calib_btn.pack(side="left", padx=2)
-
-        # Scale Spinbox
-        ttk.Label(top, text="Scale (uV):").pack(side="left", padx=(12, 2))
-        self.scale_var = tk.DoubleVar(value=200.0)
-        ttk.Spinbox(
-            top, from_=1, to=100000, increment=50, width=6,
-            textvariable=self.scale_var,
-        ).pack(side="left", padx=2)
 
         # Quit Button
         ttk.Button(top, text="Quit", command=self.on_close).pack(
@@ -141,7 +136,7 @@ class ReceiverApp(tk.Tk):
         hud_frame.pack(side="top", fill="x", padx=6, pady=(0, 2))
 
         self.ratio_hud_var = tk.StringVar(
-            value="Alpha/Beta Ratio: -- | Focus Index: -- | Baseline: 1.00"
+            value="Alpha/Beta Ratio: -- | Focus Index: -- | Baseline Ratio: 1.00"
         )
         self.hud_label = tk.Label(
             hud_frame,
@@ -177,8 +172,8 @@ class ReceiverApp(tk.Tk):
             side="bottom", fill="x", padx=6, pady=2
         )
 
-        # Figure GridSpec
-        self.fig = Figure(figsize=(10, 6.2), dpi=100)
+        # Figure GridSpec Setup
+        self.fig = Figure(figsize=(10, 6.8), dpi=100)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(
             side="top", fill="both", expand=True, padx=6, pady=6
@@ -204,7 +199,7 @@ class ReceiverApp(tk.Tk):
             self.stream_combo.current(idx)
         self.status_var.set(f"Found {len(names)} stream(s).")
 
-    # -- Connection & IMU Index Detection ----------------------------------
+    # -- Connection & IMU Detection ----------------------------------------
     def toggle_pause(self):
         self.is_paused = not self.is_paused
         if self.is_paused:
@@ -234,7 +229,7 @@ class ReceiverApp(tk.Tk):
         self.srate = full.nominal_srate() if full.nominal_srate() > 0 else 250.0
         self.labels = self._read_labels(full, self.n_channels)
 
-        # Detect Accelerometer Channels for Head Posture
+        # Detect Accelerometer Channels for Head Posture (+X Axis)
         self.acc_x_idx = self._find_channel_index(["ACC_X", "ACCEL_X", "AX"], fallback=8 if self.n_channels >= 11 else None)
         self.acc_y_idx = self._find_channel_index(["ACC_Y", "ACCEL_Y", "AY"], fallback=9 if self.n_channels >= 11 else None)
         self.acc_z_idx = self._find_channel_index(["ACC_Z", "ACCEL_Z", "AZ"], fallback=10 if self.n_channels >= 11 else None)
@@ -246,6 +241,7 @@ class ReceiverApp(tk.Tk):
 
         n_samples = max(1, int(self.srate * WINDOW_SECONDS))
         self.buffer = np.zeros((self.n_channels, n_samples), dtype=np.float64)
+        self.ab_history = np.zeros(n_samples, dtype=np.float64)
 
         # Filter Design Coefficients
         nyq = self.srate / 2.0
@@ -269,7 +265,7 @@ class ReceiverApp(tk.Tk):
         self.results_writer.writerow([
             "timestamp", "alphaPeakFreqHz", "alphaPeakAmp", "betaPeakFreqHz", 
             "betaPeakAmp", "alphaPower", "betaPower", "alphaBetaRatio", 
-            "baselineRatio", "pitchDeg", "postureAlert", "unfocusedAlert"
+            "baselineRatio", "pitchDeg", "baselinePitch", "postureAlert", "unfocusedAlert"
         ])
 
         self._build_axes()
@@ -306,7 +302,7 @@ class ReceiverApp(tk.Tk):
         self.is_paused = False
         self.status_var.set("Disconnected. Logs saved to /log directory.")
         self.hud_label.configure(fg="#00FFCC")
-        self.ratio_hud_var.set("Alpha/Beta Ratio: -- | Focus Index: -- | Baseline: 1.00")
+        self.ratio_hud_var.set("Alpha/Beta Ratio: -- | Focus Index: -- | Baseline Ratio: 1.00")
         self.posture_hud_var.set("Posture Status: Not connected.")
         self.posture_label.configure(fg="#AAAAAA")
 
@@ -334,7 +330,7 @@ class ReceiverApp(tk.Tk):
             labels = [f"CH{i + 1}" for i in range(n_channels)]
         return labels
 
-    # -- Calibration Feature (Eyes Closed Countdown -> 5s Record) -----------
+    # -- Fullscreen Calibration with Target Cross (3s Countdown -> 10s Recording) --
     def start_calibration(self):
         if self.inlet is None:
             return
@@ -342,36 +338,68 @@ class ReceiverApp(tk.Tk):
         self.calib_state = "COUNTDOWN"
         self.calib_timer_start = time.time()
         self.calibration_samples = []
+        self.calibration_pitch_samples = []
         self.is_calibrating = False
 
+        # Fullscreen Calibration Window
         self.calib_win = tk.Toplevel(self)
-        self.calib_win.title("Baseline Focus Calibration")
-        self.calib_win.geometry("420x360")
-        self.calib_win.configure(bg="#111111")
+        self.calib_win.title("Baseline Focus & Posture Calibration")
+        self.calib_win.attributes("-fullscreen", True)
+        self.calib_win.configure(bg="#0A0A0A")
         self.calib_win.transient(self)
         self.calib_win.grab_set()
 
-        self.calib_lbl_title = tk.Label(
+        # Exit calibration shortcut
+        self.calib_win.bind("<Escape>", lambda e: self.cancel_calibration())
+
+        # Top Control / Exit Bar
+        top_bar = tk.Frame(self.calib_win, bg="#0A0A0A")
+        top_bar.pack(side="top", fill="x", padx=20, pady=20)
+        tk.Button(
+            top_bar, text="Exit Fullscreen (Esc)", command=self.cancel_calibration,
+            bg="#222222", fg="#AAAAAA", bd=1, font=("Arial", 10)
+        ).pack(side="right")
+
+        # Instruction Text Label (ONLY shown during countdown)
+        self.calib_lbl_instruction = tk.Label(
             self.calib_win, 
-            text="🙈 CLOSE YOUR EYES!", 
-            font=("Arial", 16, "bold"), 
+            text="Focus your gaze on the cross in the center", 
+            font=("Arial", 22, "bold"), 
             fg="#FFCC00", 
-            bg="#111111"
+            bg="#0A0A0A"
         )
-        self.calib_lbl_title.pack(pady=(20, 10))
+        self.calib_lbl_instruction.pack(pady=(40, 10))
 
-        canvas = tk.Canvas(self.calib_win, width=140, height=140, bg="#111111", highlightthickness=0)
-        canvas.pack()
-        canvas.create_oval(20, 20, 120, 120, fill="#00FFCC", outline="#FFFFFF", width=3)
+        # Central Cross (+) Target
+        canvas_size = 240
+        canvas = tk.Canvas(
+            self.calib_win, width=canvas_size, height=canvas_size, 
+            bg="#0A0A0A", highlightthickness=0
+        )
+        canvas.pack(expand=True)
 
+        cx, cy = canvas_size // 2, canvas_size // 2
+        arm_len = 50
+        # Horizontal cross line
+        canvas.create_line(cx - arm_len, cy, cx + arm_len, cy, fill="#00FFCC", width=5)
+        # Vertical cross line
+        canvas.create_line(cx, cy - arm_len, cx, cy + arm_len, fill="#00FFCC", width=5)
+
+        # Status / Countdown Timer Label
         self.calib_timer_lbl = tk.Label(
             self.calib_win, 
             text="Starting in 3...", 
-            font=("Consolas", 14, "bold"), 
+            font=("Consolas", 18, "bold"), 
             fg="#FFFFFF", 
-            bg="#111111"
+            bg="#0A0A0A"
         )
-        self.calib_timer_lbl.pack(pady=15)
+        self.calib_timer_lbl.pack(pady=(10, 60))
+
+    def cancel_calibration(self):
+        self.is_calibrating = False
+        self.calib_state = None
+        if self.calib_win and self.calib_win.winfo_exists():
+            self.calib_win.destroy()
 
     def _update_calibration_flow(self, ab_ratio):
         if self.calib_state is None or self.calib_win is None or not self.calib_win.winfo_exists():
@@ -388,77 +416,95 @@ class ReceiverApp(tk.Tk):
                 self.calib_state = "RECORDING"
                 self.calib_timer_start = now
                 self.is_calibrating = True
-                self.calib_lbl_title.configure(text="🙈 KEEP EYES CLOSED!", fg="#00FFCC")
-        
+                # Remove the instruction label so it ONLY shows during the countdown
+                self.calib_lbl_instruction.pack_forget()
+
         elif self.calib_state == "RECORDING":
             elapsed = now - self.calib_timer_start
-            remaining = 5.0 - elapsed
+            remaining = 10.0 - elapsed
             if remaining > 0:
                 self.calib_timer_lbl.configure(text=f"Recording Baseline: {remaining:.1f}s")
                 self.calibration_samples.append(ab_ratio)
+                self.calibration_pitch_samples.append(self.current_pitch_deg)
             else:
                 self.is_calibrating = False
                 self.calib_state = None
+
                 if self.calibration_samples:
                     self.baseline_ratio = float(np.mean(self.calibration_samples))
+                if self.calibration_pitch_samples:
+                    self.baseline_pitch = float(np.mean(self.calibration_pitch_samples))
 
                 if self.calib_win and self.calib_win.winfo_exists():
                     self.calib_win.destroy()
 
                 messagebox.showinfo(
                     "Calibration Complete", 
-                    f"Baseline Alpha/Beta ratio set to: {self.baseline_ratio:.3f}"
+                    f"10-Second Baseline Calibration Complete!\n\n"
+                    f"Baseline Alpha/Beta Ratio: {self.baseline_ratio:.3f}\n"
+                    f"Baseline Head Pitch: {self.baseline_pitch:.1f}°\n"
+                    f"Allowed Posture Range: {self.baseline_pitch - TILT_OFFSET_DEG:.1f}° to {self.baseline_pitch + TILT_OFFSET_DEG:.1f}°"
                 )
 
-    # -- Subplot Setup -----------------------------------------------------
+    # -- Subplot Layout Setup ----------------------------------------------
     def _build_axes(self):
         self.fig.clear()
-        gs = self.fig.add_gridspec(2, 2, height_ratios=[3, 1], hspace=0.35, wspace=0.2)
+        
+        # GridSpec: 3 rows layout (Top: EEG Bands, Middle: Live A/B Ratio, Bottom: FFT Power Spectrums)
+        gs = self.fig.add_gridspec(3, 2, height_ratios=[2.2, 1.6, 1.8], hspace=0.45, wspace=0.22)
 
         self.ax_alpha = self.fig.add_subplot(gs[0, 0])
         self.ax_beta = self.fig.add_subplot(gs[0, 1])
-        self.ax_alpha_fft = self.fig.add_subplot(gs[1, 0])
-        self.ax_beta_fft = self.fig.add_subplot(gs[1, 1])
+        self.ax_ab_ratio = self.fig.add_subplot(gs[1, :])  # Spans across both columns
+        self.ax_alpha_fft = self.fig.add_subplot(gs[2, 0])
+        self.ax_beta_fft = self.fig.add_subplot(gs[2, 1])
 
         n_samples = self.buffer.shape[1]
         t = np.linspace(-WINDOW_SECONDS, 0, n_samples)
         target_ch_name = self.labels[0]
 
-        # Time-Domain Subplots
+        # Time-Domain EEG Subplots (Autoscaling)
         (self.line_alpha,) = self.ax_alpha.plot(t, np.zeros(n_samples), color='gold', linewidth=1.0)
-        self.ax_alpha.set_title(f"Alpha Band (8–13 Hz) - {target_ch_name}", fontsize=10)
-        self.ax_alpha.set_xlabel("Time (s)", fontsize=8)
-        self.ax_alpha.set_ylabel("uV", fontsize=8)
+        self.ax_alpha.set_title(f"Alpha Band (8–13 Hz) - {target_ch_name}", fontsize=9)
+        self.ax_alpha.set_xlabel("Time (s)", fontsize=7)
+        self.ax_alpha.set_ylabel("uV", fontsize=7)
         self.ax_alpha.set_xlim(-WINDOW_SECONDS, 0)
 
         (self.line_beta,) = self.ax_beta.plot(t, np.zeros(n_samples), color='magenta', linewidth=1.0)
-        self.ax_beta.set_title(f"Beta Band (13–30 Hz) - {target_ch_name}", fontsize=10)
-        self.ax_beta.set_xlabel("Time (s)", fontsize=8)
-        self.ax_beta.set_ylabel("uV", fontsize=8)
+        self.ax_beta.set_title(f"Beta Band (13–30 Hz) - {target_ch_name}", fontsize=9)
+        self.ax_beta.set_xlabel("Time (s)", fontsize=7)
+        self.ax_beta.set_ylabel("uV", fontsize=7)
         self.ax_beta.set_xlim(-WINDOW_SECONDS, 0)
 
-        # Smaller Power Band / FFT Subplots
+        # Live Alpha/Beta Ratio Scrolling Graph
+        (self.line_ab_ratio,) = self.ax_ab_ratio.plot(t, np.zeros(n_samples), color='#00FFCC', linewidth=1.2)
+        self.line_baseline = self.ax_ab_ratio.axhline(self.baseline_ratio, color='#FFCC00', linestyle='--', linewidth=1.0, label='Baseline')
+        self.ax_ab_ratio.set_title("Live Alpha / Beta Ratio Stream", fontsize=9, fontweight='bold', color='#00FFCC')
+        self.ax_ab_ratio.set_xlabel("Time (s)", fontsize=7)
+        self.ax_ab_ratio.set_ylabel("A/B Ratio", fontsize=7)
+        self.ax_ab_ratio.set_xlim(-WINDOW_SECONDS, 0)
+        self.ax_ab_ratio.grid(True, linestyle=':', alpha=0.4)
+
+        # Power Spectrum / FFT Subplots (Autoscaling)
         (self.line_alpha_fft,) = self.ax_alpha_fft.plot([], [], color='cyan', linewidth=1.0)
-        (self.marker_alpha_fft,) = self.ax_alpha_fft.plot([], [], 'ro', markersize=5)
+        (self.marker_alpha_fft,) = self.ax_alpha_fft.plot([], [], 'ro', markersize=4)
         self.ax_alpha_fft.set_title("Alpha Power Spectrum", fontsize=8)
         self.ax_alpha_fft.set_xlabel("Hz", fontsize=7)
         self.ax_alpha_fft.set_ylabel("Mag", fontsize=7)
         self.ax_alpha_fft.tick_params(labelsize=7)
         self.ax_alpha_fft.set_xlim(0, 40)
-        self.ax_alpha_fft.set_ylim(bottom=0)
 
         (self.line_beta_fft,) = self.ax_beta_fft.plot([], [], color='cyan', linewidth=1.0)
-        (self.marker_beta_fft,) = self.ax_beta_fft.plot([], [], 'ro', markersize=5)
+        (self.marker_beta_fft,) = self.ax_beta_fft.plot([], [], 'ro', markersize=4)
         self.ax_beta_fft.set_title("Beta Power Spectrum", fontsize=8)
         self.ax_beta_fft.set_xlabel("Hz", fontsize=7)
         self.ax_beta_fft.set_ylabel("Mag", fontsize=7)
         self.ax_beta_fft.tick_params(labelsize=7)
         self.ax_beta_fft.set_xlim(0, 40)
-        self.ax_beta_fft.set_ylim(bottom=0)
 
         self.canvas.draw()
 
-    # -- Process IMU Head Tilt (+X Forward / -X Backward past 25°) ---------
+    # -- Process Posture Deviation relative to Calibrated Baseline (+/- 25°) -
     def _process_posture(self):
         if self.acc_x_idx is None or self.acc_x_idx >= self.n_channels:
             self.posture_hud_var.set("Posture Status: IMU Accelerometer channels unavailable.")
@@ -469,16 +515,19 @@ class ReceiverApp(tk.Tk):
         ay_val = self.buffer[self.acc_y_idx, -1] if self.acc_y_idx is not None else 0.0
         az_val = self.buffer[self.acc_z_idx, -1] if self.acc_z_idx is not None else 1.0
 
-        # Pitch angle calculation in degrees (+X forward, -X backward)
+        # Pitch angle calculation (+X forward, -X backward)
         denom = np.sqrt(ay_val**2 + az_val**2)
         if denom < 1e-6:
             denom = 1e-6
         pitch_rad = np.arctan2(ax_val, denom)
         self.current_pitch_deg = float(np.degrees(pitch_rad))
 
+        max_pitch_limit = self.baseline_pitch + TILT_OFFSET_DEG
+        min_pitch_limit = self.baseline_pitch - TILT_OFFSET_DEG
+
         now = time.time()
-        is_forward_tilt = self.current_pitch_deg > TILT_THRESHOLD_DEG
-        is_backward_tilt = self.current_pitch_deg < -TILT_THRESHOLD_DEG
+        is_forward_tilt = self.current_pitch_deg > max_pitch_limit
+        is_backward_tilt = self.current_pitch_deg < min_pitch_limit
         is_tilted = is_forward_tilt or is_backward_tilt
 
         if is_tilted:
@@ -490,24 +539,24 @@ class ReceiverApp(tk.Tk):
             if elapsed >= TILT_DURATION_SEC:
                 self.tilt_alert_active = True
                 self.posture_hud_var.set(
-                    f"⚠️ POSTURE WARNING: Head tilted {tilt_dir} past {TILT_THRESHOLD_DEG:.0f}° for {elapsed:.1f}s! (Tilt: {self.current_pitch_deg:.1f}°)"
+                    f"⚠️ POOR POSTURE ALERT: Head tilted {tilt_dir} >25° from baseline for {elapsed:.1f}s! (Tilt: {self.current_pitch_deg:.1f}°, Base: {self.baseline_pitch:.1f}°)"
                 )
                 self.posture_label.configure(fg="#FF2222")
             else:
                 self.tilt_alert_active = False
                 self.posture_hud_var.set(
-                    f"Posture Warning Pending... Head tilted {tilt_dir} ({self.current_pitch_deg:.1f}°) for {elapsed:.1f}s / {TILT_DURATION_SEC:.0f}s"
+                    f"Posture Warning Pending... Tilted {tilt_dir} ({self.current_pitch_deg:.1f}°) for {elapsed:.1f}s / {TILT_DURATION_SEC:.0f}s"
                 )
                 self.posture_label.configure(fg="#FFAA00")
         else:
             self.tilt_start_time = None
             self.tilt_alert_active = False
             self.posture_hud_var.set(
-                f"Posture Status: Good (Pitch: {self.current_pitch_deg:.1f}°)"
+                f"Posture Status: Good (Pitch: {self.current_pitch_deg:.1f}°, Baseline: {self.baseline_pitch:.1f}°, Range: {min_pitch_limit:.1f}° to {max_pitch_limit:.1f}°)"
             )
             self.posture_label.configure(fg="#00FF66")
 
-    # -- Main Update Loop --------------------------------------------------
+    # -- Main Processing & UI Redraw Loop ----------------------------------
     def _update(self):
         if self.inlet is None:
             return
@@ -549,10 +598,14 @@ class ReceiverApp(tk.Tk):
                     ab_ratio = alpha_power / (beta_power + eps)
                     ba_ratio = beta_power / (alpha_power + eps)
 
-                    # Active Calibration Step
+                    # Update rolling A/B ratio history array
+                    self.ab_history = np.roll(self.ab_history, -1)
+                    self.ab_history[-1] = ab_ratio
+
+                    # Calibration step machine update
                     self._update_calibration_flow(ab_ratio)
 
-                    # 15-second Unfocused Warning Tracking (2.0x Baseline)
+                    # 15-second Unfocused Warning Tracking (2.0x Baseline Ratio)
                     unfocused_limit = UNFOCUSED_MULT * self.baseline_ratio
                     is_above_unfocused_limit = ab_ratio >= unfocused_limit
                     now = time.time()
@@ -565,7 +618,7 @@ class ReceiverApp(tk.Tk):
                         if unfocused_elapsed >= UNFOCUSED_DURATION_SEC:
                             self.unfocused_alert_active = True
                             text_color = "#FF2222"
-                            focus_status_text = f"⚠️ UNFOCUSED ALERT (>15s above 2.0x baseline!)"
+                            focus_status_text = "⚠️ UNFOCUSED ALERT (>15s above 2.0x baseline!)"
                         else:
                             self.unfocused_alert_active = False
                             text_color = "#FFAA00"
@@ -584,30 +637,46 @@ class ReceiverApp(tk.Tk):
                         filtered_beta, self.srate, band_low=13.0, band_high=30.0
                     )
 
-                    # Log computed metrics, posture, and unfocused alert status
+                    # CSV Results Logging
                     self.results_writer.writerow([
                         datetime.now().strftime("%H:%M:%S.%f"),
                         f"{alpha_freq:.2f}", f"{alpha_amp:.2f}",
                         f"{beta_freq:.2f}", f"{beta_amp:.2f}",
                         f"{alpha_power:.4f}", f"{beta_power:.4f}",
                         f"{ab_ratio:.4f}", f"{self.baseline_ratio:.4f}",
-                        f"{self.current_pitch_deg:.2f}", int(self.tilt_alert_active),
-                        int(self.unfocused_alert_active)
+                        f"{self.current_pitch_deg:.2f}", f"{self.baseline_pitch:.2f}",
+                        int(self.tilt_alert_active), int(self.unfocused_alert_active)
                     ])
 
                     self.hud_label.configure(fg=text_color)
                     self.ratio_hud_var.set(
-                        f"Alpha/Beta Ratio: {ab_ratio:.2f} | Focus Index: {ba_ratio:.2f} | Baseline: {self.baseline_ratio:.2f} (Limit: {unfocused_limit:.2f}) | Status: {focus_status_text}"
+                        f"Alpha/Beta Ratio: {ab_ratio:.2f} | Focus Index: {ba_ratio:.2f} | Baseline Ratio: {self.baseline_ratio:.2f} (Limit: {unfocused_limit:.2f}) | Status: {focus_status_text}"
                     )
 
-                    # Update Plots
+                    # Update Lines
                     self.line_alpha.set_ydata(filtered_alpha)
                     self.line_beta.set_ydata(filtered_beta)
+                    self.line_ab_ratio.set_ydata(self.ab_history)
+                    self.line_baseline.set_ydata([self.baseline_ratio, self.baseline_ratio])
 
-                    scale = self.scale_var.get()
-                    self.ax_alpha.set_ylim(-scale, scale)
-                    self.ax_beta.set_ylim(-scale, scale)
+                    # Dynamic Y-Axis Autoscaling for Time-Domain EEG Subplots
+                    a_min, a_max = float(np.min(filtered_alpha)), float(np.max(filtered_alpha))
+                    if a_max - a_min < 1e-3:
+                        a_min, a_max = a_min - 1.0, a_max + 1.0
+                    self.ax_alpha.set_ylim(a_min * 1.15, a_max * 1.15)
 
+                    b_min, b_max = float(np.min(filtered_beta)), float(np.max(filtered_beta))
+                    if b_max - b_min < 1e-3:
+                        b_min, b_max = b_min - 1.0, b_max + 1.0
+                    self.ax_beta.set_ylim(b_min * 1.15, b_max * 1.15)
+
+                    # Dynamic Y-Axis Autoscaling for Live A/B Ratio Subplot
+                    ab_min, ab_max = float(np.min(self.ab_history)), float(np.max(self.ab_history))
+                    if ab_max - ab_min < 0.1:
+                        ab_min, ab_max = ab_min - 0.2, ab_max + 0.2
+                    self.ax_ab_ratio.set_ylim(max(0.0, ab_min * 0.9), ab_max * 1.15)
+
+                    # Dynamic Y-Axis Autoscaling for FFT Power Spectra Subplots
                     alpha_mask = f_pos_a <= 40
                     self.line_alpha_fft.set_data(f_pos_a[alpha_mask], P_pos_a[alpha_mask])
                     self.marker_alpha_fft.set_data([alpha_freq], [alpha_amp])
