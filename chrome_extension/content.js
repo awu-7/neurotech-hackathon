@@ -5,6 +5,36 @@ let lastEventId = -1;
 let polling = false;
 let connected = false;
 let videoId = new URL(location.href).searchParams.get("v");
+let capture = null;
+let bridgeSession = null;
+const pendingIntervals = new Map();
+
+function saveInterval(interval) {
+    pendingIntervals.set(interval.id, interval);
+    chrome.runtime.sendMessage({type: "saveInterval", interval}, response => {
+        if (chrome.runtime.lastError || !response?.ok) {
+            showStatus("Interval save failed; retrying while this tab stays open");
+        } else {
+            pendingIntervals.delete(interval.id);
+            showStatus("Interval saved. Use Explain What I Missed in NeuroLearn.");
+        }
+    });
+}
+setInterval(() => {
+    for (const interval of pendingIntervals.values()) saveInterval(interval);
+}, 5000);
+
+function resetVideo() {
+    const currentId = new URL(location.href).searchParams.get("v");
+    if (currentId === videoId) return;
+    if (replay) replay.video.playbackRate = replay.originalSpeed;
+    videoId = currentId;
+    savedDistractionTime = null;
+    capture = null;
+    replay = null;
+    closeRewindPrompt();
+    showStatus("New video loaded");
+}
 
 // Find the YouTube video
 function getVideo() {
@@ -27,7 +57,7 @@ function showStatus(message) {
     }
 
     label.textContent = "Neurotech: " + message;
-    
+
 }
 
 
@@ -154,6 +184,7 @@ document.addEventListener("fullscreenchange", () => {
 
 // Process commands from the desktop app
 function handleCommand(action) {
+    resetVideo();
     if (action === "prompt_rewind") {
         showRewindPrompt();
         return;
@@ -167,15 +198,22 @@ function handleCommand(action) {
     }
 
     if (action === "distracted") {
-        // Save only the first distraction timestamp
-        if (savedDistractionTime === null && replay === null) {
-            savedDistractionTime = video.currentTime;
-            showStatus(
-                `Distraction saved at ${savedDistractionTime.toFixed(1)}s`
-            );
-        }
+        closeRewindPrompt();
+        if (!videoId || video.paused || video.ended || replay) return;
+        capture = {id: crypto.randomUUID(), video_id: videoId, start: video.currentTime};
+        savedDistractionTime = video.currentTime;
+        showStatus(`Distraction saved at ${savedDistractionTime.toFixed(1)}s`);
 
     } else if (action === "focused") {
+        if (capture) {
+            const interval = {...capture, end: video.currentTime};
+            capture = null;
+            if (interval.end > interval.start && interval.end - interval.start <= 1800) {
+                saveInterval(interval);
+            } else {
+                showStatus("Interval invalid after seek, pause, or more than 30 minutes");
+            }
+        }
         // Keep the saved timestamp
         if (savedDistractionTime !== null) {
             showStatus(
@@ -184,6 +222,7 @@ function handleCommand(action) {
         }
 
     } else if (action === "discard") {
+        capture = null;
         closeRewindPrompt();
         savedDistractionTime = null;
         showStatus("Distraction cleared");
@@ -234,21 +273,14 @@ function handleCommand(action) {
 
 // Check whether the video has caught up
 setInterval(() => {
-    const currentId = new URL(location.href).searchParams.get("v");
-
-    if (currentId !== videoId) {
-        videoId = currentId;
-        savedDistractionTime = null;
-        replay = null;
-        closeRewindPrompt();
-        showStatus("New video loaded");
-    }
+    resetVideo();
 
     if (!replay) return;
 
     const video = getVideo();
 
     if (video !== replay.video) {
+        replay.video.playbackRate = replay.originalSpeed;
         replay = null;
         showStatus("Video changed; replay stopped");
         return;
@@ -282,6 +314,10 @@ function poll() {
                 showStatus("Desktop app disconnected");
             }
             connected = false;
+            lastEventId = -1;
+            closeRewindPrompt();
+            capture = null;
+            savedDistractionTime = null;
             return;
         }
 
@@ -290,6 +326,15 @@ function poll() {
         }
 
         connected = true;
+        if (bridgeSession !== null && bridgeSession !== response.data.session) {
+            closeRewindPrompt();
+            capture = null;
+            savedDistractionTime = null;
+            lastEventId = -1;
+            bridgeSession = response.data.session;
+            return;
+        }
+        bridgeSession = response.data.session;
         lastEventId = response.data.last_id;
 
         for (const event of response.data.events) {

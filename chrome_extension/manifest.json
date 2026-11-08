@@ -4,7 +4,7 @@
   "name": "Neurotech Lecture Controller",
   "version": "1.0",
   "description": "Connect the desktop neurotech app to YouTube playback.",
-  "permissions": [],
+  "permissions": ["storage"],
   "host_permissions": [
     "http://127.0.0.1/*"
   ],
@@ -13,7 +13,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.youtube.com/watch*"],
+      "matches": ["https://www.youtube.com/*"],
       "js": ["content.js"]
     }
   ]

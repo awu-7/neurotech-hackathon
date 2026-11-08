@@ -77,7 +77,6 @@ class ReceiverApp(tk.Tk):
         self.ab_history_size = 0
 
         # Full Session Focus Tracking
-        self.full_focus_history = []
         self.session_start_time = 0.0
 
         self.streams = []
@@ -300,7 +299,6 @@ class ReceiverApp(tk.Tk):
         self.ab_history_size = int((AB_WINDOW_SECONDS * 1000) / REDRAW_MS)
         self.ab_history = np.zeros(self.ab_history_size, dtype=np.float64)
 
-        self.full_focus_history = []
         self.session_start_time = time.time()
 
         nyq = self.srate / 2.0
@@ -492,8 +490,7 @@ class ReceiverApp(tk.Tk):
 
         self.ax_alpha = self.fig.add_subplot(gs[0, 0:3])
         self.ax_beta = self.fig.add_subplot(gs[0, 3:6])
-        self.ax_ab_ratio = self.fig.add_subplot(gs[1, 0:5])
-        self.ax_focus_bar = self.fig.add_subplot(gs[1, 5])
+        self.ax_ab_ratio = self.fig.add_subplot(gs[1, :])
         self.ax_alpha_fft = self.fig.add_subplot(gs[2, 0:3])
         self.ax_beta_fft = self.fig.add_subplot(gs[2, 3:6])
 
@@ -528,22 +525,6 @@ class ReceiverApp(tk.Tk):
         self.ax_ab_ratio.set_xlabel("Time (s)", fontsize=7)
         self.ax_ab_ratio.set_xlim(-AB_WINDOW_SECONDS, 0)
         self.ax_ab_ratio.grid(True, linestyle=':', color=CARD_BORDER, alpha=0.6)
-
-        # Tiny Vertical Stacked Bar Chart for Session Focus Percentage
-        self.ax_focus_bar.set_facecolor(CARD_BG)
-        self.ax_focus_bar.set_title("Focus %", fontsize=8, fontweight='bold', color=TEXT_MAIN)
-        self.ax_focus_bar.set_xlim(-0.5, 0.5)
-        self.ax_focus_bar.set_ylim(0, 100)
-        self.ax_focus_bar.set_xticks([])
-        self.ax_focus_bar.tick_params(colors=TEXT_MUTED, labelsize=7)
-        for spine in self.ax_focus_bar.spines.values():
-            spine.set_color(CARD_BORDER)
-
-        self.bar_green = self.ax_focus_bar.bar([0], [100], color=ACCENT_GREEN, width=0.6)
-        self.bar_red = self.ax_focus_bar.bar([0], [0], bottom=[100], color=ACCENT_RED, width=0.6)
-        self.text_focus_pct = self.ax_focus_bar.text(
-            0, 50, "100%", color="#0B0D10", ha='center', va='center', fontweight='bold', fontsize=8
-        )
 
         (self.line_alpha_fft,) = self.ax_alpha_fft.plot([], [], color=ACCENT_CYAN, linewidth=1.0)
         (self.marker_alpha_fft,) = self.ax_alpha_fft.plot([], [], 'ro', color=ACCENT_RED, markersize=4)
@@ -679,9 +660,6 @@ class ReceiverApp(tk.Tk):
 
                     self.is_focused = not self.unfocused_alert_active
 
-                    # Update Full Session Focus History
-                    self.full_focus_history.append(1 if self.is_focused else 0)
-
                     if hasattr(self, 'focus_outlet') and self.focus_outlet:
                         self.focus_outlet.push_sample([1 if self.is_focused else 0])
 
@@ -707,16 +685,6 @@ class ReceiverApp(tk.Tk):
                     self.line_beta.set_ydata(filtered_beta)
                     self.line_ab_ratio.set_ydata(self.ab_history)
                     self.line_baseline.set_ydata([self.baseline_ratio, self.baseline_ratio])
-
-                    # Render Tiny Vertical Focus Percentage Bar
-                    total_samples = len(self.full_focus_history)
-                    focused_pct = (sum(self.full_focus_history) / total_samples * 100.0) if total_samples > 0 else 100.0
-                    unfocused_pct = 100.0 - focused_pct
-
-                    self.bar_green[0].set_height(focused_pct)
-                    self.bar_red[0].set_height(unfocused_pct)
-                    self.bar_red[0].set_y(focused_pct)
-                    self.text_focus_pct.set_text(f"{focused_pct:.0f}%")
 
                     a_min, a_max = float(np.min(filtered_alpha)), float(np.max(filtered_alpha))
                     if a_max - a_min < 1e-3: a_min, a_max = a_min - 1.0, a_max + 1.0

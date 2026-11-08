@@ -4,6 +4,7 @@ import queue
 import threading
 from urllib.request import urlopen
 import customtkinter as ctk
+from recovery_panel import RecoveryPanel
 
 import serial
 import serial.tools.list_ports
@@ -18,8 +19,8 @@ ctk.set_default_color_theme("blue")
 
 app = ctk.CTk()
 app.title("NeuroLearn")
-app.geometry("680x480")
-app.resizable(False, False)
+app.geometry("760x850")
+app.resizable(True, True)
 
 running = False
 focused = True
@@ -34,7 +35,7 @@ def init_pico_serial(default_port="COM8", baudrate=115200):
     """Attempts to auto-detect or connect to the Raspberry Pi Pico over USB serial."""
     global pico_ser
     pico_port = None
-    
+
     # Auto-detect Pico port if possible
     ports = list(serial.tools.list_ports.comports())
     for port in ports:
@@ -319,8 +320,11 @@ message_label = ctk.CTkLabel(
 )
 message_label.pack(pady=(16, 10), padx=15)
 
+recovery_panel = RecoveryPanel(app)
+recovery_panel.pack(fill="both", expand=True, padx=32, pady=10)
 
 def on_close():
+    recovery_panel.closed.set()
     stop_network.set()
     if pico_ser and pico_ser.is_open:
         try:

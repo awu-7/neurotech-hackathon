@@ -1,2 +1,10 @@
 pyautogui
 customtkinter
+Flask>=3.0,<4
+numpy>=1.24,<3
+scipy>=1.10,<2
+matplotlib>=3.7,<4
+pylsl>=1.16,<2
+pyserial>=3.5,<4
+youtube-transcript-api>=1.0,<2
+requests>=2.31,<3
