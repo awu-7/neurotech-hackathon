@@ -16,7 +16,7 @@ AB_WINDOW_SECONDS = 10.0      # Live A/B ratio window length
 REDRAW_MS = 40                # ~25 FPS redraw timer
 TILT_OFFSET_DEG = 25.0        # Allowed head posture deviation (+/- 25° from calibrated baseline)
 TILT_DURATION_SEC = 5.0       # Required continuous posture deviation duration (seconds)
-UNFOCUSED_MULT = 2.0          # Unfocused threshold multiplier (2.0x baseline)
+UNFOCUSED_MULT = 1.8          # Unfocused threshold multiplier (1.8x baseline)
 UNFOCUSED_DURATION_SEC = 15.0 # Continuous unfocused duration before alert (seconds)
 
 # Dark Theme Palette
@@ -62,7 +62,7 @@ class ReceiverApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("NeuroPawn Knight - Sleek Multimodal Studio")
-        self.geometry("1240x980")
+        self.geometry("1240x940")
         self.configure(bg=DARK_BG)
 
         self.inlet = None
@@ -77,10 +77,7 @@ class ReceiverApp(tk.Tk):
 
         # Full Session Focus Tracking
         self.full_focus_history = []
-        self.full_focus_time = []
         self.session_start_time = 0.0
-        self.focus_poly_green = None
-        self.focus_poly_red = None
 
         self.streams = []
         self._after_id = None
@@ -228,7 +225,7 @@ class ReceiverApp(tk.Tk):
         )
         status_bar.pack(side="bottom", fill="x")
 
-        self.fig = Figure(figsize=(10, 7.5), dpi=100, facecolor=DARK_BG)
+        self.fig = Figure(figsize=(10, 6.8), dpi=100, facecolor=DARK_BG)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(
             side="top", fill="both", expand=True, padx=14, pady=(0, 8)
@@ -303,10 +300,7 @@ class ReceiverApp(tk.Tk):
         self.ab_history = np.zeros(self.ab_history_size, dtype=np.float64)
 
         self.full_focus_history = []
-        self.full_focus_time = []
         self.session_start_time = time.time()
-        self.focus_poly_green = None
-        self.focus_poly_red = None
 
         nyq = self.srate / 2.0
         self.b_alpha, self.a_alpha = butter(4, [8.0 / nyq, 13.0 / nyq], btype='band')
@@ -486,21 +480,21 @@ class ReceiverApp(tk.Tk):
 
                 messagebox.showinfo(
                     "Calibration Complete", 
-                    f"Baseline Alpha/Beta Ratio: {self.baseline_ratio:.3f}\n"
-                    f"Baseline Head Pitch: {self.baseline_pitch:.1f}°"
+                    f"Baseline Alpha/Beta Ratio set to: {self.baseline_ratio:.3f}"
                 )
 
     def _build_axes(self):
         self.fig.clear()
         
-        gs = self.fig.add_gridspec(4, 2, height_ratios=[2.2, 1.6, 0.5, 1.8], hspace=0.6, wspace=0.22)
+        # 3 Rows x 6 Columns layout
+        gs = self.fig.add_gridspec(3, 6, height_ratios=[2.2, 1.6, 1.8], hspace=0.48, wspace=0.3)
 
-        self.ax_alpha = self.fig.add_subplot(gs[0, 0])
-        self.ax_beta = self.fig.add_subplot(gs[0, 1])
-        self.ax_ab_ratio = self.fig.add_subplot(gs[1, :])
-        self.ax_focus = self.fig.add_subplot(gs[2, :])
-        self.ax_alpha_fft = self.fig.add_subplot(gs[3, 0])
-        self.ax_beta_fft = self.fig.add_subplot(gs[3, 1])
+        self.ax_alpha = self.fig.add_subplot(gs[0, 0:3])
+        self.ax_beta = self.fig.add_subplot(gs[0, 3:6])
+        self.ax_ab_ratio = self.fig.add_subplot(gs[1, 0:5])
+        self.ax_focus_bar = self.fig.add_subplot(gs[1, 5])
+        self.ax_alpha_fft = self.fig.add_subplot(gs[2, 0:3])
+        self.ax_beta_fft = self.fig.add_subplot(gs[2, 3:6])
 
         axes_list = [self.ax_alpha, self.ax_beta, self.ax_ab_ratio, self.ax_alpha_fft, self.ax_beta_fft]
         for ax in axes_list:
@@ -534,17 +528,21 @@ class ReceiverApp(tk.Tk):
         self.ax_ab_ratio.set_xlim(-AB_WINDOW_SECONDS, 0)
         self.ax_ab_ratio.grid(True, linestyle=':', color=CARD_BORDER, alpha=0.6)
 
-        # Full Session Barcode Graph Dual Polygon Setup
-        self.ax_focus.set_facecolor(DARK_BG)
-        self.ax_focus.set_title("Session Focus Map: Focused (Green) vs Unfocused (Red)", fontsize=8, color=TEXT_MUTED)
-        self.ax_focus.set_xticks([])
-        self.ax_focus.set_yticks([])
-        self.ax_focus.set_ylim(0, 1)
-        for spine in self.ax_focus.spines.values():
-            spine.set_visible(False)
+        # Tiny Vertical Stacked Bar Chart for Session Focus Percentage
+        self.ax_focus_bar.set_facecolor(CARD_BG)
+        self.ax_focus_bar.set_title("Focus %", fontsize=8, fontweight='bold', color=TEXT_MAIN)
+        self.ax_focus_bar.set_xlim(-0.5, 0.5)
+        self.ax_focus_bar.set_ylim(0, 100)
+        self.ax_focus_bar.set_xticks([])
+        self.ax_focus_bar.tick_params(colors=TEXT_MUTED, labelsize=7)
+        for spine in self.ax_focus_bar.spines.values():
+            spine.set_color(CARD_BORDER)
 
-        self.focus_poly_green = None
-        self.focus_poly_red = None
+        self.bar_green = self.ax_focus_bar.bar([0], [100], color=ACCENT_GREEN, width=0.6)
+        self.bar_red = self.ax_focus_bar.bar([0], [0], bottom=[100], color=ACCENT_RED, width=0.6)
+        self.text_focus_pct = self.ax_focus_bar.text(
+            0, 50, "100%", color="#0B0D10", ha='center', va='center', fontweight='bold', fontsize=8
+        )
 
         (self.line_alpha_fft,) = self.ax_alpha_fft.plot([], [], color=ACCENT_CYAN, linewidth=1.0)
         (self.marker_alpha_fft,) = self.ax_alpha_fft.plot([], [], 'ro', color=ACCENT_RED, markersize=4)
@@ -597,7 +595,7 @@ class ReceiverApp(tk.Tk):
             self.tilt_start_time = None
             self.tilt_alert_active = False
             self.is_posture_good = True       
-            self.posture_hud_var.set(f"Posture Status: Good (Pitch: {self.current_pitch_deg:.1f}°)")
+            self.posture_hud_var.set("Posture Status: Good")
             self.posture_label.configure(fg=ACCENT_GREEN)
 
     def _update(self):
@@ -660,10 +658,8 @@ class ReceiverApp(tk.Tk):
 
                     self.is_focused = not self.unfocused_alert_active
 
-                    # Update Full Session Map Arrays
-                    elapsed_session = now - self.session_start_time
+                    # Update Full Session Focus History
                     self.full_focus_history.append(1 if self.is_focused else 0)
-                    self.full_focus_time.append(elapsed_session)
 
                     if hasattr(self, 'focus_outlet') and self.focus_outlet:
                         self.focus_outlet.push_sample([1 if self.is_focused else 0])
@@ -691,24 +687,15 @@ class ReceiverApp(tk.Tk):
                     self.line_ab_ratio.set_ydata(self.ab_history)
                     self.line_baseline.set_ydata([self.baseline_ratio, self.baseline_ratio])
 
-                    # Render Full Session Barcode Plot (True Multi-color History)
-                    if self.focus_poly_green is not None:
-                        try: self.focus_poly_green.remove()
-                        except Exception: pass
-                    if self.focus_poly_red is not None:
-                        try: self.focus_poly_red.remove()
-                        except Exception: pass
+                    # Render Tiny Vertical Focus Percentage Bar
+                    total_samples = len(self.full_focus_history)
+                    focused_pct = (sum(self.full_focus_history) / total_samples * 100.0) if total_samples > 0 else 100.0
+                    unfocused_pct = 100.0 - focused_pct
 
-                    if len(self.full_focus_time) > 0:
-                        self.focus_poly_green = self.ax_focus.fill_between(
-                            self.full_focus_time, 0, self.full_focus_history, 
-                            color=ACCENT_GREEN, step='post', alpha=0.85
-                        )
-                        self.focus_poly_red = self.ax_focus.fill_between(
-                            self.full_focus_time, self.full_focus_history, 1, 
-                            color=ACCENT_RED, step='post', alpha=0.85
-                        )
-                    self.ax_focus.set_xlim(0, max(10, elapsed_session))
+                    self.bar_green[0].set_height(focused_pct)
+                    self.bar_red[0].set_height(unfocused_pct)
+                    self.bar_red[0].set_y(focused_pct)
+                    self.text_focus_pct.set_text(f"{focused_pct:.0f}%")
 
                     a_min, a_max = float(np.min(filtered_alpha)), float(np.max(filtered_alpha))
                     if a_max - a_min < 1e-3: a_min, a_max = a_min - 1.0, a_max + 1.0
