@@ -5,7 +5,7 @@ import queue
 import threading
 from urllib.request import urlopen
 import customtkinter as ctk
-import pyautogui
+
 from bridge import start_bridge, send_command
 from sync_logging import get_logger
 
@@ -16,14 +16,14 @@ ctk.set_default_color_theme("blue")
 
 app = ctk.CTk()
 app.title("NeuroLearn")
-app.geometry("680x590")
+app.geometry("680x480")
 app.resizable(False, False)
 
 running = False
 focused = True
 unfocused_start = 0
 unfocused_seconds = 0
-pending_rewind = 0
+
 
 # Flask is the source of truth for UI focus text.
 STATUS_URL = "http://127.0.0.1:5001/api/status"
@@ -136,12 +136,11 @@ def update_screen():
 
 
 def start_session():
-    global running, focused, unfocused_seconds, pending_rewind
+    global running, focused, unfocused_seconds
     running = True
     log.info("SESSION STARTED | current EEG status=%s", current_status)
     focused = True
     unfocused_seconds = 0
-    pending_rewind = 0
     start_button.configure(state="disabled")
     message_label.configure(text="Session started. Monitoring EEG from test.py.")
     send_command("discard")
@@ -164,40 +163,40 @@ def set_unfocused():
 
 
 def set_focused():
-    global focused, unfocused_seconds, pending_rewind
+    global focused, unfocused_seconds
+
     if not running or focused:
         return
-    unfocused_seconds = int((time.monotonic() - unfocused_start) // 5) * 5
-    if unfocused_seconds >= 10:
-        pending_rewind = unfocused_seconds
-        message_label.configure(
-            text=f"You may have missed {pending_rewind} seconds. Rewind?"
-        )
-        rewind_button.configure(state="normal")
-        continue_button.configure(state="normal")
-    else:
-        message_label.configure(text="Short distraction. No rewind needed.")
-        send_command("discard")
+
+    unfocused_seconds = int(time.monotonic() - unfocused_start)
+
     focused = True
-    log.info("TRACKING distraction ended | seconds=%s", unfocused_seconds)
+
+    log.info(
+        "TRACKING distraction ended | seconds=%s",
+        unfocused_seconds
+    )
+
     send_command("focused")
+
+    if unfocused_seconds >= 10:
+        message_label.configure(
+            text="Focus returned. Check YouTube for the rewind popup."
+        )
+
+        send_command("prompt_rewind")
+
+    else:
+        message_label.configure(
+            text="Short distraction. No rewind needed."
+        )
+
+        send_command("discard")
+
     unfocused_seconds = 0
     update_screen()
 
 
-def simulate_unfocused():
-    # Demonstrates session behavior, but cannot overwrite the live EEG label.
-    if not running:
-        message_label.configure(text="Click Start Session first.")
-        return
-    set_unfocused()
-
-
-def simulate_focused():
-    if not running:
-        message_label.configure(text="Click Start Session first.")
-        return
-    set_focused()
 
 
 def update_timer():
@@ -208,53 +207,6 @@ def update_timer():
     app.after(250, update_timer)
 
 
-def continue_lecture():
-    global pending_rewind
-    pending_rewind = 0
-    rewind_button.configure(state="disabled")
-    continue_button.configure(state="disabled")
-    message_label.configure(text="Continuing without rewinding.")
-    send_command("discard")
-
-
-def send_rewind(seconds):
-    original_speed = float(speed_var.get().replace("x", ""))
-
-    # Rewind the video
-    presses = max(1, seconds // 5)
-    pyautogui.press("left", presses=presses, interval=0.2)
-
-    # Don't slow down below 0.25x
-    if original_speed <= 0.25:
-        return
-
-    # Slow down by 0.25x
-    pyautogui.hotkey("shift", ",")
-
-    slower_speed = original_speed - 0.25
-
-    # Calculate how long replay should take
-    replay_time = (presses * 5) / slower_speed
-
-    # Restore the original speed
-    app.after(int(replay_time * 1000),lambda: pyautogui.hotkey("shift", "."))
-
-def rewind_lecture():
-    global pending_rewind
-
-    seconds = pending_rewind
-    if seconds == 0:
-        return
-
-    pending_rewind = 0
-    rewind_button.configure(state="disabled")
-    continue_button.configure(state="disabled")
-    message_label.configure(
-        text="Switch to your video using Alt+Tab. Rewinding in 5 seconds!"
-    )
-
-    send_command("rewind")
-    app.after(5000, lambda: send_rewind(seconds))
 
 
 header = ctk.CTkLabel(
@@ -316,30 +268,9 @@ start_button = ctk.CTkButton(
 )
 start_button.pack(pady=(10, 18))
 
-button_row = ctk.CTkFrame(app, fg_color="transparent")
-button_row.pack(pady=(0, 16))
 
-unfocused_button = ctk.CTkButton(
-    button_row,
-    text="Simulate Unfocused",
-    width=190,
-    height=40,
-    fg_color="#B45B31",
-    hover_color="#944522",
-    command=simulate_unfocused
-)
-unfocused_button.pack(side="left", padx=8)
 
-focused_button = ctk.CTkButton(
-    button_row,
-    text="Simulate Focused",
-    width=190,
-    height=40,
-    fg_color="#247F62",
-    hover_color="#1D624C",
-    command=simulate_focused
-)
-focused_button.pack(side="left", padx=8)
+
 
 prompt_card = ctk.CTkFrame(app, corner_radius=16)
 prompt_card.pack(fill="x", padx=32, pady=5)
@@ -351,42 +282,6 @@ message_label = ctk.CTkLabel(
 )
 message_label.pack(pady=(16, 10), padx=15)
 
-prompt_buttons = ctk.CTkFrame(
-    prompt_card,
-    fg_color="transparent"
-)
-prompt_buttons.pack(pady=(0, 15))
-
-rewind_button = ctk.CTkButton(
-    prompt_buttons,
-    text="Rewind Lecture",
-    width=170,
-    command=rewind_lecture,
-    state="disabled"
-)
-rewind_button.pack(side="left", padx=8)
-
-continue_button = ctk.CTkButton(
-    prompt_buttons,
-    text="Continue",
-    width=140,
-    fg_color="#4B5563",
-    hover_color="#374151",
-    command=continue_lecture,
-    state="disabled"
-)
-continue_button.pack(side="left", padx=8)
-
-speed_var = ctk.StringVar(value="1.75x")
-
-speed_menu = ctk.CTkOptionMenu(
-    app,
-    values=["0.5x", "0.75x", "1x", "1.25x",
-            "1.5x", "1.75x", "2x"],
-    variable=speed_var
-)
-
-speed_menu.pack(pady=10)
 
 def on_close():
     stop_network.set()
