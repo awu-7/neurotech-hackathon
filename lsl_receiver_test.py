@@ -66,13 +66,13 @@ class ReceiverApp(tk.Tk):
         self.configure(bg=DARK_BG)
 
         self.inlet = None
-        self.focus_outlet = None  
+        self.focus_outlet = None
         self.srate = 250.0
         self.n_channels = 0
         self.labels = []
-        self.buffer = None       
+        self.buffer = None
         
-        self.ab_history = None   
+        self.ab_history = None
         self.ab_history_size = 0
 
         # Full Session Focus Tracking
@@ -85,13 +85,13 @@ class ReceiverApp(tk.Tk):
 
         # State Variables
         self.is_paused = False
-        self.is_focused = True        
-        self.is_posture_good = True   
-        self.baseline_ratio = 1.0     
-        self.baseline_pitch = 0.0     
+        self.is_focused = True
+        self.is_posture_good = True
+        self.baseline_ratio = 1.0
+        self.baseline_pitch = 0.0
 
         # Calibration State Machine
-        self.calib_state = None   
+        self.calib_state = None
         self.calib_timer_start = 0.0
         self.is_calibrating = False
         self.calibration_samples = []
@@ -298,7 +298,7 @@ class ReceiverApp(tk.Tk):
         n_samples = max(1, int(self.srate * WINDOW_SECONDS))
         self.buffer = np.zeros((self.n_channels, n_samples), dtype=np.float64)
 
-        # FIX: A/B ratio history decoupled from EEG sample rate, set to 10 seconds
+        # A/B ratio history decoupled from EEG sample rate, set to 10 seconds
         self.ab_history_size = int((AB_WINDOW_SECONDS * 1000) / REDRAW_MS)
         self.ab_history = np.zeros(self.ab_history_size, dtype=np.float64)
 
@@ -640,31 +640,6 @@ class ReceiverApp(tk.Tk):
                     unfocused_limit = UNFOCUSED_MULT * self.baseline_ratio
                     now = time.time()
 
-                    # 1. Smooth the ratio over the last 2 seconds to ignore blinks/noise
-                    smooth_frames = int(2.0 * 1000 / REDRAW_MS)
-                    smoothed_ab = np.mean(self.ab_history[-smooth_frames:])
-
-                    # 2. Use the smoothed ratio and a shorter duration (4 seconds)
-                    REQUIRED_UNFOCUSED_SEC = 4.0 
-                    
-                    if smoothed_ab >= unfocused_limit:
-                        if self.unfocused_start_time is None: 
-                            self.unfocused_start_time = now
-                        elapsed = now - self.unfocused_start_time
-                        if elapsed >= REQUIRED_UNFOCUSED_SEC:
-                            self.unfocused_alert_active = True
-                            text_color = ACCENT_RED
-                            focus_status_text = "⚠️ UNFOCUSED ALERT"
-                        else:
-                            self.unfocused_alert_active = False
-                            text_color = ACCENT_AMBER
-                            focus_status_text = f"Unfocused Pending ({elapsed:.1f}s / {REQUIRED_UNFOCUSED_SEC:.1f}s)"
-                    else:
-                        self.unfocused_start_time = None
-                        self.unfocused_alert_active = False
-                        text_color = ACCENT_GREEN
-                        focus_status_text = "Focused"
-
                     if ab_ratio >= unfocused_limit:
                         if self.unfocused_start_time is None: self.unfocused_start_time = now
                         elapsed = now - self.unfocused_start_time
@@ -717,14 +692,11 @@ class ReceiverApp(tk.Tk):
 
                     # Render Full Session Barcode Plot
                     self.line_focus.set_data(self.full_focus_time, self.full_focus_history)
+                    if self.is_focused:
+                        self.line_focus.set_color(ACCENT_GREEN)
+                    else:
+                        self.line_focus.set_color(ACCENT_RED)
                     self.ax_focus.set_xlim(0, max(10, elapsed_session))
-                    
-                    # Create the "filled barcode" look dynamically
-                    self.ax_focus.collections.clear() # Prevents memory leaks
-                    self.ax_focus.fill_between(
-                        self.full_focus_time, 0, self.full_focus_history, 
-                        color=ACCENT_GREEN, step='post', alpha=0.4
-                    )
 
                     a_min, a_max = float(np.min(filtered_alpha)), float(np.max(filtered_alpha))
                     if a_max - a_min < 1e-3: a_min, a_max = a_min - 1.0, a_max + 1.0
