@@ -79,6 +79,8 @@ class ReceiverApp(tk.Tk):
         self.full_focus_history = []
         self.full_focus_time = []
         self.session_start_time = 0.0
+        self.focus_poly_green = None
+        self.focus_poly_red = None
 
         self.streams = []
         self._after_id = None
@@ -294,18 +296,17 @@ class ReceiverApp(tk.Tk):
         self.is_focused = True
         self.is_posture_good = True
 
-        # EEG buffer sized to exactly WINDOW_SECONDS (5s)
         n_samples = max(1, int(self.srate * WINDOW_SECONDS))
         self.buffer = np.zeros((self.n_channels, n_samples), dtype=np.float64)
 
-        # A/B ratio history decoupled from EEG sample rate, set to 10 seconds
         self.ab_history_size = int((AB_WINDOW_SECONDS * 1000) / REDRAW_MS)
         self.ab_history = np.zeros(self.ab_history_size, dtype=np.float64)
 
-        # Full session tracker initialization
         self.full_focus_history = []
         self.full_focus_time = []
         self.session_start_time = time.time()
+        self.focus_poly_green = None
+        self.focus_poly_red = None
 
         nyq = self.srate / 2.0
         self.b_alpha, self.a_alpha = butter(4, [8.0 / nyq, 13.0 / nyq], btype='band')
@@ -492,7 +493,6 @@ class ReceiverApp(tk.Tk):
     def _build_axes(self):
         self.fig.clear()
         
-        # Grid updated for 4 rows to fit the new full session graph
         gs = self.fig.add_gridspec(4, 2, height_ratios=[2.2, 1.6, 0.5, 1.8], hspace=0.6, wspace=0.22)
 
         self.ax_alpha = self.fig.add_subplot(gs[0, 0])
@@ -526,7 +526,6 @@ class ReceiverApp(tk.Tk):
         self.ax_beta.set_xlabel("Time (s)", fontsize=7)
         self.ax_beta.set_xlim(-WINDOW_SECONDS, 0)
 
-        # A/B Ratio Subplot (Now 10 Seconds)
         t_ab = np.linspace(-AB_WINDOW_SECONDS, 0, self.ab_history_size)
         (self.line_ab_ratio,) = self.ax_ab_ratio.plot(t_ab, np.zeros(self.ab_history_size), color=ACCENT_CYAN, linewidth=1.3)
         self.line_baseline = self.ax_ab_ratio.axhline(self.baseline_ratio, color=ACCENT_AMBER, linestyle='--', linewidth=1.1, label='Baseline')
@@ -535,15 +534,17 @@ class ReceiverApp(tk.Tk):
         self.ax_ab_ratio.set_xlim(-AB_WINDOW_SECONDS, 0)
         self.ax_ab_ratio.grid(True, linestyle=':', color=CARD_BORDER, alpha=0.6)
 
-        # Full Session Barcode Graph
+        # Full Session Barcode Graph Dual Polygon Setup
         self.ax_focus.set_facecolor(DARK_BG)
-        (self.line_focus,) = self.ax_focus.plot([], [], color=ACCENT_GREEN, drawstyle='steps-post', linewidth=1.5)
-        self.ax_focus.set_title("Session Focus Map: Focused (Up) vs Unfocused (Down)", fontsize=8, color=TEXT_MUTED)
+        self.ax_focus.set_title("Session Focus Map: Focused (Green) vs Unfocused (Red)", fontsize=8, color=TEXT_MUTED)
         self.ax_focus.set_xticks([])
         self.ax_focus.set_yticks([])
-        self.ax_focus.set_ylim(-0.2, 1.2)
+        self.ax_focus.set_ylim(0, 1)
         for spine in self.ax_focus.spines.values():
             spine.set_visible(False)
+
+        self.focus_poly_green = None
+        self.focus_poly_red = None
 
         (self.line_alpha_fft,) = self.ax_alpha_fft.plot([], [], color=ACCENT_CYAN, linewidth=1.0)
         (self.marker_alpha_fft,) = self.ax_alpha_fft.plot([], [], 'ro', color=ACCENT_RED, markersize=4)
@@ -659,7 +660,7 @@ class ReceiverApp(tk.Tk):
 
                     self.is_focused = not self.unfocused_alert_active
 
-                    # Update Full Session Map
+                    # Update Full Session Map Arrays
                     elapsed_session = now - self.session_start_time
                     self.full_focus_history.append(1 if self.is_focused else 0)
                     self.full_focus_time.append(elapsed_session)
@@ -690,12 +691,23 @@ class ReceiverApp(tk.Tk):
                     self.line_ab_ratio.set_ydata(self.ab_history)
                     self.line_baseline.set_ydata([self.baseline_ratio, self.baseline_ratio])
 
-                    # Render Full Session Barcode Plot
-                    self.line_focus.set_data(self.full_focus_time, self.full_focus_history)
-                    if self.is_focused:
-                        self.line_focus.set_color(ACCENT_GREEN)
-                    else:
-                        self.line_focus.set_color(ACCENT_RED)
+                    # Render Full Session Barcode Plot (True Multi-color History)
+                    if self.focus_poly_green is not None:
+                        try: self.focus_poly_green.remove()
+                        except Exception: pass
+                    if self.focus_poly_red is not None:
+                        try: self.focus_poly_red.remove()
+                        except Exception: pass
+
+                    if len(self.full_focus_time) > 0:
+                        self.focus_poly_green = self.ax_focus.fill_between(
+                            self.full_focus_time, 0, self.full_focus_history, 
+                            color=ACCENT_GREEN, step='post', alpha=0.85
+                        )
+                        self.focus_poly_red = self.ax_focus.fill_between(
+                            self.full_focus_time, self.full_focus_history, 1, 
+                            color=ACCENT_RED, step='post', alpha=0.85
+                        )
                     self.ax_focus.set_xlim(0, max(10, elapsed_session))
 
                     a_min, a_max = float(np.min(filtered_alpha)), float(np.max(filtered_alpha))
