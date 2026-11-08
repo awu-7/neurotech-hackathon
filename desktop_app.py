@@ -1,3 +1,4 @@
+
 import time
 import json
 import queue
@@ -8,25 +9,20 @@ import customtkinter as ctk
 from bridge import start_bridge, send_command
 from sync_logging import get_logger
 
-
 log = get_logger("desktop")
-
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
-
 
 app = ctk.CTk()
 app.title("NeuroLearn")
 app.geometry("680x480")
 app.resizable(False, False)
 
-
 running = False
 focused = True
 unfocused_start = 0
 unfocused_seconds = 0
-
 
 
 # Flask is the source of truth for UI focus text.
@@ -40,8 +36,6 @@ last_log_status = None
 last_connection_status = None
 
 
-
-
 def _send_network_event(item):
     try:
         network_events.put_nowait(item)
@@ -51,8 +45,6 @@ def _send_network_event(item):
         except queue.Empty:
             pass
         network_events.put_nowait(item)
-
-
 
 
 def _poll_server():
@@ -67,8 +59,6 @@ def _poll_server():
         stop_network.wait(0.3)
 
 
-
-
 def _process_network_events():
     global current_status, current_display, last_live_revision, last_log_status, last_connection_status
     newest = None
@@ -77,7 +67,6 @@ def _process_network_events():
             newest = network_events.get_nowait()
     except queue.Empty:
         pass
-
 
     if newest:
         kind, payload = newest
@@ -131,10 +120,7 @@ def _process_network_events():
                         set_focused()
         update_screen()
 
-
     app.after(100, _process_network_events)
-
-
 
 
 def update_screen():
@@ -149,8 +135,6 @@ def update_screen():
     seconds_label.configure(text=f"{unfocused_seconds} seconds")
 
 
-
-
 def start_session():
     global running, focused, unfocused_seconds
     running = True
@@ -163,8 +147,6 @@ def start_session():
     if current_status in ("pending", "unfocused"):
         set_unfocused()
     update_screen()
-
-
 
 
 def set_unfocused():
@@ -217,8 +199,6 @@ def set_focused():
 
 
 
-
-
 def update_timer():
     global unfocused_seconds
     if running and not focused:
@@ -236,7 +216,6 @@ header = ctk.CTkLabel(
 )
 header.pack(pady=(24, 3))
 
-
 subtitle = ctk.CTkLabel(
     app,
     text="EEG lecture companion | Flask live sync",
@@ -244,16 +223,13 @@ subtitle = ctk.CTkLabel(
 )
 subtitle.pack(pady=(0, 8))
 
-
 connection_label = ctk.CTkLabel(
     app, text="Flask server: connecting...", text_color="#FFB86C"
 )
 connection_label.pack(pady=(0, 8))
 
-
 card = ctk.CTkFrame(app, corner_radius=16)
 card.pack(fill="x", padx=32, pady=8)
-
 
 status_heading = ctk.CTkLabel(
     card,
@@ -262,14 +238,12 @@ status_heading = ctk.CTkLabel(
 )
 status_heading.pack(pady=(20, 4))
 
-
 status_label = ctk.CTkLabel(
     card,
     text="Session not started",
     font=ctk.CTkFont(size=25, weight="bold")
 )
 status_label.pack()
-
 
 seconds_heading = ctk.CTkLabel(
     card,
@@ -278,14 +252,12 @@ seconds_heading = ctk.CTkLabel(
 )
 seconds_heading.pack(pady=(12, 2))
 
-
 seconds_label = ctk.CTkLabel(
     card,
     text="0 seconds",
     font=ctk.CTkFont(size=25, weight="bold")
 )
 seconds_label.pack(pady=(0, 20))
-
 
 start_button = ctk.CTkButton(
     app,
@@ -297,14 +269,11 @@ start_button = ctk.CTkButton(
 start_button.pack(pady=(10, 18))
 
 
-button_row = ctk.CTkFrame(app, fg_color="transparent")
-button_row.pack(pady=(0, 16))
 
 
 
 prompt_card = ctk.CTkFrame(app, corner_radius=16)
 prompt_card.pack(fill="x", padx=32, pady=5)
-
 
 message_label = ctk.CTkLabel(
     prompt_card,
@@ -317,7 +286,6 @@ message_label.pack(pady=(16, 10), padx=15)
 def on_close():
     stop_network.set()
     app.destroy()
-
 
 app.protocol("WM_DELETE_WINDOW", on_close)
 update_timer()
