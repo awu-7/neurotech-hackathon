@@ -5,7 +5,7 @@ import queue
 import threading
 from urllib.request import urlopen
 import customtkinter as ctk
-import pyautogui
+from recovery_panel import RecoveryPanel
 from bridge import start_bridge, send_command
 from sync_logging import get_logger
 
@@ -16,8 +16,8 @@ ctk.set_default_color_theme("blue")
 
 app = ctk.CTk()
 app.title("NeuroLearn")
-app.geometry("680x590")
-app.resizable(False, False)
+app.geometry("760x850")
+app.resizable(True, True)
 
 running = False
 focused = True
@@ -151,10 +151,13 @@ def start_session():
 
 
 def set_unfocused():
-    global focused, unfocused_start, unfocused_seconds
+    global focused, unfocused_start, unfocused_seconds, pending_rewind
     if not running or not focused:
         return
     focused = False
+    pending_rewind = 0
+    rewind_button.configure(state="disabled")
+    continue_button.configure(state="disabled")
     log.info("TRACKING distraction started")
     unfocused_start = time.monotonic()
     unfocused_seconds = 0
@@ -177,7 +180,6 @@ def set_focused():
         continue_button.configure(state="normal")
     else:
         message_label.configure(text="Short distraction. No rewind needed.")
-        send_command("discard")
     focused = True
     log.info("TRACKING distraction ended | seconds=%s", unfocused_seconds)
     send_command("focused")
@@ -217,28 +219,6 @@ def continue_lecture():
     send_command("discard")
 
 
-def send_rewind(seconds):
-    original_speed = float(speed_var.get().replace("x", ""))
-
-    # Rewind the video
-    presses = max(1, seconds // 5)
-    pyautogui.press("left", presses=presses, interval=0.2)
-
-    # Don't slow down below 0.25x
-    if original_speed <= 0.25:
-        return
-
-    # Slow down by 0.25x
-    pyautogui.hotkey("shift", ",")
-
-    slower_speed = original_speed - 0.25
-
-    # Calculate how long replay should take
-    replay_time = (presses * 5) / slower_speed
-
-    # Restore the original speed
-    app.after(int(replay_time * 1000),lambda: pyautogui.hotkey("shift", "."))
-
 def rewind_lecture():
     global pending_rewind
 
@@ -250,11 +230,10 @@ def rewind_lecture():
     rewind_button.configure(state="disabled")
     continue_button.configure(state="disabled")
     message_label.configure(
-        text="Switch to your video using Alt+Tab. Rewinding in 5 seconds!"
+        text="Rewind requested. Check the YouTube extension status."
     )
 
     send_command("rewind")
-    app.after(5000, lambda: send_rewind(seconds))
 
 
 header = ctk.CTkLabel(
@@ -377,18 +356,11 @@ continue_button = ctk.CTkButton(
 )
 continue_button.pack(side="left", padx=8)
 
-speed_var = ctk.StringVar(value="1.75x")
-
-speed_menu = ctk.CTkOptionMenu(
-    app,
-    values=["0.5x", "0.75x", "1x", "1.25x",
-            "1.5x", "1.75x", "2x"],
-    variable=speed_var
-)
-
-speed_menu.pack(pady=10)
+recovery_panel = RecoveryPanel(app)
+recovery_panel.pack(fill="both", expand=True, padx=32, pady=10)
 
 def on_close():
+    recovery_panel.closed.set()
     stop_network.set()
     app.destroy()
 

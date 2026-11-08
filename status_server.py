@@ -5,12 +5,15 @@ import threading
 import time
 from flask import Flask, jsonify, request
 from sync_logging import get_logger
+from recovery_api import register_recovery
 
 log = get_logger("server")
 _last_status = None
 _last_report = 0.0
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 16384
+register_recovery(app)
 lock = threading.Lock()
 state = {"status": "Waiting for EEG", "display": "Waiting for EEG", "ratio": None,
          "baseline": None, "updated_at": None, "revision": 0}

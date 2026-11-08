@@ -1,11 +1,13 @@
 
 import json
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 commands = []
 commands_lock = threading.Lock()
+bridge_session = uuid.uuid4().hex
 
 
 def send_command(action):
@@ -41,6 +43,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 ]
 
         body = json.dumps({
+            "session": bridge_session,
             "last_id": latest_id,
             "events": events
         }).encode("utf-8")
