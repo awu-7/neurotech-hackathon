@@ -58,6 +58,22 @@ def find_peak(filtered_signal, srate, band_low, band_high):
     return f_pos, P_pos, peak_freq, peak_amp
 
 
+def detect_blink(alpha_power, baseline_alpha_power, threshold_scale=0.3):
+    """Detects an eye blink when Alpha wave power drops below a threshold relative to baseline.
+
+    Parameters:
+        alpha_power (float): Current frame's Alpha band power.
+        baseline_alpha_power (float): Calibrated baseline Alpha power.
+        threshold_scale (float): Multiplier scale (default 0.3 = 30% of baseline).
+
+    Returns:
+        bool: True if a blink is detected, False otherwise.
+    """
+    if baseline_alpha_power <= 0:
+        return False
+    return alpha_power < (baseline_alpha_power * threshold_scale)
+
+
 class ReceiverApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -82,12 +98,15 @@ class ReceiverApp(tk.Tk):
         self.streams = []
         self._after_id = None
 
-        # Focus State Variables (Separated)
+        # Focus & Blink State Variables
         self.is_instant_unfocused = False   # Immediate threshold status (>1.8x baseline)
         self.is_instant_focused = True      # Immediate focus status (<1.8x baseline)
         self.is_sustained_unfocused = False # Continuous >10s unfocused alert
         self.is_sustained_focused = True    # 10s sustained focus status (broadcasting to external script)
         self.is_focused = True              # Alias for external LSL stream compatibility
+        
+        self.baseline_alpha_power = 1.0     # Baseline Alpha power threshold for blink detection
+        self.is_blink_detected = False      # Blink status flag
 
         # Posture State Variables
         self.is_posture_good = True
@@ -100,6 +119,7 @@ class ReceiverApp(tk.Tk):
         self.is_calibrating = False
         self.calibration_samples = []
         self.calibration_pitch_samples = []
+        self.calibration_alpha_samples = []
         self.calib_win = None
 
         # Focus Tracker State
@@ -284,7 +304,7 @@ class ReceiverApp(tk.Tk):
         self.srate = full.nominal_srate() if full.nominal_srate() > 0 else 250.0
         self.labels = self._read_labels(full, self.n_channels)
 
-        # OPTION 1 FIX: 2-Channel Telemetry Stream (Ch0 = Focus State, Ch1 = Head Pitch Angle)
+        # 2-Channel Telemetry Stream (Ch0 = Focus State, Ch1 = Head Pitch Angle)
         telemetry_info = StreamInfo('NeuroPawnTelemetry', 'Telemetry', 2, 0, 'float32', 'telemetry_stream_01')
         self.focus_outlet = StreamOutlet(telemetry_info)
 
@@ -302,6 +322,7 @@ class ReceiverApp(tk.Tk):
         self.is_sustained_focused = True
         self.is_focused = True
         self.is_posture_good = True
+        self.is_blink_detected = False
 
         n_samples = max(1, int(self.srate * WINDOW_SECONDS))
         self.buffer = np.zeros((self.n_channels, n_samples), dtype=np.float64)
@@ -367,7 +388,7 @@ class ReceiverApp(tk.Tk):
             self.results_file.close()
 
         self.connect_btn.configure(text="Connect Stream")
-        self.pause_btn.configure(text="Pause", state="disabled")
+        self.pause_btn.configure(state="disabled")
         self.calib_btn.configure(state="disabled")
         self.is_paused = False
         self.status_var.set("Disconnected. Logs written to /log directory.")
@@ -408,6 +429,7 @@ class ReceiverApp(tk.Tk):
         self.calib_timer_start = time.time()
         self.calibration_samples = []
         self.calibration_pitch_samples = []
+        self.calibration_alpha_samples = []
         self.is_calibrating = False
 
         self.calib_win = tk.Toplevel(self)
@@ -455,7 +477,7 @@ class ReceiverApp(tk.Tk):
         if self.calib_win and self.calib_win.winfo_exists():
             self.calib_win.destroy()
 
-    def _update_calibration_flow(self, ab_ratio):
+    def _update_calibration_flow(self, ab_ratio, alpha_power):
         if self.calib_state is None or self.calib_win is None or not self.calib_win.winfo_exists():
             return
 
@@ -478,6 +500,7 @@ class ReceiverApp(tk.Tk):
                 self.calib_timer_lbl.configure(text=f"Recording Baseline: {remaining:.1f}s")
                 self.calibration_samples.append(ab_ratio)
                 self.calibration_pitch_samples.append(self.current_pitch_deg)
+                self.calibration_alpha_samples.append(alpha_power)
             else:
                 self.is_calibrating = False
                 self.calib_state = None
@@ -485,12 +508,15 @@ class ReceiverApp(tk.Tk):
                     self.baseline_ratio = float(np.mean(self.calibration_samples))
                 if self.calibration_pitch_samples:
                     self.baseline_pitch = float(np.mean(self.calibration_pitch_samples))
+                if self.calibration_alpha_samples:
+                    self.baseline_alpha_power = float(np.mean(self.calibration_alpha_samples))
                 if self.calib_win and self.calib_win.winfo_exists():
                     self.calib_win.destroy()
 
                 messagebox.showinfo(
                     "Calibration Complete", 
-                    f"Baseline Alpha/Beta Ratio set to: {self.baseline_ratio:.3f}"
+                    f"Baseline Alpha/Beta Ratio set to: {self.baseline_ratio:.3f}\n"
+                    f"Baseline Alpha Power set to: {self.baseline_alpha_power:.4f}"
                 )
 
     def _build_axes(self):
@@ -640,6 +666,10 @@ class ReceiverApp(tk.Tk):
 
                     alpha_power = max(1e-9, float(np.mean(filtered_alpha ** 2)))
                     beta_power = max(1e-9, float(np.mean(filtered_beta ** 2)))
+
+                    # Real-time Blink Detection
+                    self.is_blink_detected = detect_blink(alpha_power, self.baseline_alpha_power, threshold_scale=0.3)
+
                     ab_ratio = float(alpha_power / (beta_power + 1e-9))
                     if np.isnan(ab_ratio) or np.isinf(ab_ratio):
                         ab_ratio = 1.0
@@ -647,7 +677,7 @@ class ReceiverApp(tk.Tk):
                     self.ab_history = np.roll(self.ab_history, -1)
                     self.ab_history[-1] = ab_ratio
 
-                    self._update_calibration_flow(ab_ratio)
+                    self._update_calibration_flow(ab_ratio, alpha_power)
 
                     unfocused_limit = UNFOCUSED_MULT * self.baseline_ratio
                     now = time.time()
@@ -682,7 +712,7 @@ class ReceiverApp(tk.Tk):
                     # 4. Accumulate Immediate Focus State for Vertical Bar
                     self.full_focus_history.append(1 if self.is_instant_focused else 0)
 
-                    # OPTION 1 FIX: Broadcast 2-Channel Telemetry Vector [Focus State, Pitch Angle]
+                    # 5. Broadcast 2-Channel Telemetry Vector [Focus State, Pitch Angle] over LSL
                     if hasattr(self, 'focus_outlet') and self.focus_outlet:
                         focus_val = 1.0 if self.is_sustained_focused else 0.0
                         pitch_val = float(self.current_pitch_deg)
@@ -701,9 +731,11 @@ class ReceiverApp(tk.Tk):
                         int(self.tilt_alert_active), int(self.unfocused_alert_active)
                     ])
 
+                    # HUD status includes optional visual indicator when an eye blink occurs
+                    blink_flag = " | 👁️ BLINK" if self.is_blink_detected else ""
                     self.hud_label.configure(fg=text_color)
                     self.ratio_hud_var.set(
-                        f"Alpha/Beta: {ab_ratio:.2f} | Baseline: {self.baseline_ratio:.2f} | Status: {focus_status_text}"
+                        f"Alpha/Beta: {ab_ratio:.2f} | Baseline: {self.baseline_ratio:.2f} | Status: {focus_status_text}{blink_flag}"
                     )
 
                     self.line_alpha.set_ydata(filtered_alpha)
