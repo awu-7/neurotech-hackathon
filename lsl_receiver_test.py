@@ -17,7 +17,7 @@ REDRAW_MS = 40                # ~25 FPS redraw timer
 TILT_OFFSET_DEG = 25.0        # Allowed head posture deviation (+/- 25° from calibrated baseline)
 TILT_DURATION_SEC = 5.0       # Required continuous posture deviation duration (seconds)
 UNFOCUSED_MULT = 1.8          # Unfocused threshold multiplier (1.8x baseline)
-UNFOCUSED_DURATION_SEC = 15.0 # Continuous unfocused duration before alert (seconds)
+UNFOCUSED_DURATION_SEC = 10.0 # 10-second continuous unfocused threshold for external alert
 
 # Dark Theme Palette
 DARK_BG = "#0D0F12"
@@ -75,16 +75,21 @@ class ReceiverApp(tk.Tk):
         self.ab_history = None
         self.ab_history_size = 0
 
-        # Full Session Focus Tracking
+        # Full Session Focus Tracking (Immediate Focus State History)
         self.full_focus_history = []
         self.session_start_time = 0.0
 
         self.streams = []
         self._after_id = None
 
-        # State Variables
-        self.is_paused = False
-        self.is_focused = True
+        # Focus State Variables (Separated)
+        self.is_instant_unfocused = False   # Immediate threshold status (>1.8x baseline)
+        self.is_instant_focused = True      # Immediate focus status (<1.8x baseline)
+        self.is_sustained_unfocused = False # Continuous >10s unfocused alert
+        self.is_sustained_focused = True    # 10s sustained focus status (broadcasting to external script)
+        self.is_focused = True              # Alias for external LSL stream compatibility
+
+        # Posture State Variables
         self.is_posture_good = True
         self.baseline_ratio = 1.0
         self.baseline_pitch = 0.0
@@ -290,6 +295,10 @@ class ReceiverApp(tk.Tk):
         self.tilt_alert_active = False
         self.unfocused_start_time = None
         self.unfocused_alert_active = False
+        self.is_instant_unfocused = False
+        self.is_instant_focused = True
+        self.is_sustained_unfocused = False
+        self.is_sustained_focused = True
         self.is_focused = True
         self.is_posture_good = True
 
@@ -486,15 +495,15 @@ class ReceiverApp(tk.Tk):
     def _build_axes(self):
         self.fig.clear()
         
-        # 3 Rows x 6 Columns layout
-        gs = self.fig.add_gridspec(3, 6, height_ratios=[2.2, 1.6, 1.8], hspace=0.48, wspace=0.3)
+        # 3 Rows x 12 Columns layout for ultra-thinner vertical focus bar (1/12th ratio)
+        gs = self.fig.add_gridspec(3, 12, height_ratios=[2.2, 1.6, 1.8], hspace=0.48, wspace=0.35)
 
-        self.ax_alpha = self.fig.add_subplot(gs[0, 0:3])
-        self.ax_beta = self.fig.add_subplot(gs[0, 3:6])
-        self.ax_ab_ratio = self.fig.add_subplot(gs[1, 0:5])
-        self.ax_focus_bar = self.fig.add_subplot(gs[1, 5])
-        self.ax_alpha_fft = self.fig.add_subplot(gs[2, 0:3])
-        self.ax_beta_fft = self.fig.add_subplot(gs[2, 3:6])
+        self.ax_alpha = self.fig.add_subplot(gs[0, 0:6])
+        self.ax_beta = self.fig.add_subplot(gs[0, 6:12])
+        self.ax_ab_ratio = self.fig.add_subplot(gs[1, 0:11])
+        self.ax_focus_bar = self.fig.add_subplot(gs[1, 11])
+        self.ax_alpha_fft = self.fig.add_subplot(gs[2, 0:6])
+        self.ax_beta_fft = self.fig.add_subplot(gs[2, 6:12])
 
         axes_list = [self.ax_alpha, self.ax_beta, self.ax_ab_ratio, self.ax_alpha_fft, self.ax_beta_fft]
         for ax in axes_list:
@@ -528,9 +537,9 @@ class ReceiverApp(tk.Tk):
         self.ax_ab_ratio.set_xlim(-AB_WINDOW_SECONDS, 0)
         self.ax_ab_ratio.grid(True, linestyle=':', color=CARD_BORDER, alpha=0.6)
 
-        # Tiny Vertical Stacked Bar Chart for Session Focus Percentage
+        # Ultra-Thin Vertical Stacked Bar Chart for Session Immediate Focus Percentage
         self.ax_focus_bar.set_facecolor(CARD_BG)
-        self.ax_focus_bar.set_title("Focus %", fontsize=8, fontweight='bold', color=TEXT_MAIN)
+        self.ax_focus_bar.set_title("Focus", fontsize=8, fontweight='bold', color=TEXT_MAIN)
         self.ax_focus_bar.set_xlim(-0.5, 0.5)
         self.ax_focus_bar.set_ylim(0, 100)
         self.ax_focus_bar.set_xticks([])
@@ -538,10 +547,10 @@ class ReceiverApp(tk.Tk):
         for spine in self.ax_focus_bar.spines.values():
             spine.set_color(CARD_BORDER)
 
-        self.bar_green = self.ax_focus_bar.bar([0], [100], color=ACCENT_GREEN, width=0.6)
-        self.bar_red = self.ax_focus_bar.bar([0], [0], bottom=[100], color=ACCENT_RED, width=0.6)
+        self.bar_green = self.ax_focus_bar.bar([0], [100], color=ACCENT_GREEN, width=0.35)
+        self.bar_red = self.ax_focus_bar.bar([0], [0], bottom=[100], color=ACCENT_RED, width=0.35)
         self.text_focus_pct = self.ax_focus_bar.text(
-            0, 50, "100%", color="#0B0D10", ha='center', va='center', fontweight='bold', fontsize=8
+            0, 50, "100%", color="#0B0D10", ha='center', va='center', fontweight='bold', fontsize=7
         )
 
         (self.line_alpha_fft,) = self.ax_alpha_fft.plot([], [], color=ACCENT_CYAN, linewidth=1.0)
@@ -639,13 +648,18 @@ class ReceiverApp(tk.Tk):
                     unfocused_limit = UNFOCUSED_MULT * self.baseline_ratio
                     now = time.time()
 
-                    if ab_ratio >= unfocused_limit:
+                    # 1. Immediate Unfocused State (used to accumulate percentages in the thin vertical bar)
+                    self.is_instant_unfocused = bool(ab_ratio >= unfocused_limit)
+                    self.is_instant_focused = not self.is_instant_unfocused
+
+                    # 2. 10-Second Sustained Unfocused Tracker
+                    if self.is_instant_unfocused:
                         if self.unfocused_start_time is None: self.unfocused_start_time = now
                         elapsed = now - self.unfocused_start_time
                         if elapsed >= UNFOCUSED_DURATION_SEC:
                             self.unfocused_alert_active = True
                             text_color = ACCENT_RED
-                            focus_status_text = "⚠️ UNFOCUSED ALERT"
+                            focus_status_text = "⚠️ UNFOCUSED ALERT (>10s)"
                         else:
                             self.unfocused_alert_active = False
                             text_color = ACCENT_AMBER
@@ -656,13 +670,17 @@ class ReceiverApp(tk.Tk):
                         text_color = ACCENT_GREEN
                         focus_status_text = "Focused"
 
-                    self.is_focused = not self.unfocused_alert_active
+                    # 3. Sustained Focus Variables (10-second alert state passed to external scripts)
+                    self.is_sustained_unfocused = self.unfocused_alert_active
+                    self.is_sustained_focused = not self.is_sustained_unfocused
+                    self.is_focused = self.is_sustained_focused
 
-                    # Update Full Session Focus History
-                    self.full_focus_history.append(1 if self.is_focused else 0)
+                    # 4. Accumulate Immediate Focus State for Vertical Bar
+                    self.full_focus_history.append(1 if self.is_instant_focused else 0)
 
+                    # 5. Push 10-second Sustained Focus State to Outbound LSL Outlet
                     if hasattr(self, 'focus_outlet') and self.focus_outlet:
-                        self.focus_outlet.push_sample([1 if self.is_focused else 0])
+                        self.focus_outlet.push_sample([1 if self.is_sustained_focused else 0])
 
                     f_pos_a, P_pos_a, alpha_freq, alpha_amp = find_peak(filtered_alpha, self.srate, 8.0, 13.0)
                     f_pos_b, P_pos_b, beta_freq, beta_amp = find_peak(filtered_beta, self.srate, 13.0, 30.0)
@@ -687,7 +705,7 @@ class ReceiverApp(tk.Tk):
                     self.line_ab_ratio.set_ydata(self.ab_history)
                     self.line_baseline.set_ydata([self.baseline_ratio, self.baseline_ratio])
 
-                    # Render Tiny Vertical Focus Percentage Bar
+                    # Render Thinner Vertical Focus Percentage Bar (Accumulates Immediate Focus State)
                     total_samples = len(self.full_focus_history)
                     focused_pct = (sum(self.full_focus_history) / total_samples * 100.0) if total_samples > 0 else 100.0
                     unfocused_pct = 100.0 - focused_pct
