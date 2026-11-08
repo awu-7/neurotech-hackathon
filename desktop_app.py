@@ -1,4 +1,3 @@
-
 import time
 import json
 import queue
@@ -6,6 +5,10 @@ import threading
 from urllib.request import urlopen
 import customtkinter as ctk
 from recovery_panel import RecoveryPanel
+
+import serial
+import serial.tools.list_ports
+
 from bridge import start_bridge, send_command
 from sync_logging import get_logger
 
@@ -23,7 +26,44 @@ running = False
 focused = True
 unfocused_start = 0
 unfocused_seconds = 0
-pending_rewind = 0
+
+# Raspberry Pi Pico USB Serial Handle
+pico_ser = None
+
+
+def init_pico_serial(default_port="COM8", baudrate=115200):
+    """Attempts to auto-detect or connect to the Raspberry Pi Pico over USB serial."""
+    global pico_ser
+    pico_port = None
+
+    # Auto-detect Pico port if possible
+    ports = list(serial.tools.list_ports.comports())
+    for port in ports:
+        if any(term in port.description for term in ["Pico", "Board in FS Mode", "USB Serial Device", "ttyACM"]):
+            pico_port = port.device
+            break
+
+    if not pico_port:
+        pico_port = default_port
+
+    try:
+        pico_ser = serial.Serial(pico_port, baudrate, timeout=0.1)
+        log.info("PICO SERIAL | Connected on %s", pico_port)
+    except Exception as e:
+        log.warning("PICO SERIAL | Connection failed on %s: %s", pico_port, e)
+        pico_ser = None
+
+
+def send_to_pico(status, pitch=0.0):
+    """Sends JSON telemetry over USB serial to the Raspberry Pi Pico."""
+    global pico_ser
+    if pico_ser and pico_ser.is_open:
+        try:
+            payload = json.dumps({"status": status, "pitch": round(float(pitch), 1)}) + "\n"
+            pico_ser.write(payload.encode('utf-8'))
+        except Exception as e:
+            log.error("PICO SERIAL WRITE ERROR | %s", e)
+
 
 # Flask is the source of truth for UI focus text.
 STATUS_URL = "http://127.0.0.1:5001/api/status"
@@ -81,6 +121,8 @@ def _process_network_events():
             current_status = "waiting"
             current_display = "Server offline"
             last_live_revision = None
+            send_to_pico("offline", 0.0)
+
         elif not payload.get("live"):
             if last_connection_status != "waiting":
                 log.warning("SERVER ONLINE but EEG data STALE / WAITING for test.py")
@@ -92,6 +134,8 @@ def _process_network_events():
             current_status = "waiting"
             current_display = "Waiting for EEG"
             last_live_revision = None
+            send_to_pico("waiting", 0.0)
+
         else:
             if last_connection_status != "live":
                 log.info("SERVER ONLINE | EEG LIVE")
@@ -101,15 +145,21 @@ def _process_network_events():
                 text_color="#55D6A0"
             )
             status = payload.get("status", "waiting")
+            pitch = payload.get("pitch", 0.0)
+
             if status not in ("focused", "pending", "unfocused"):
                 status = "waiting"
             current_display = payload.get("display", status)
             current_status = status
+
+            # Stream telemetry payload directly to Raspberry Pi Pico
+            send_to_pico(status, pitch)
+
             if status != last_log_status:
                 log.info("DISPLAY UPDATED | revision=%s status=%s text=%r", payload.get("revision"), status, current_display)
                 last_log_status = status
+
             # Update distraction tracking on status TRANSITIONS only.
-            # Pending and Alert are both displayed as unfocused states.
             revision = payload.get("revision")
             if revision != last_live_revision:
                 last_live_revision = revision
@@ -136,12 +186,11 @@ def update_screen():
 
 
 def start_session():
-    global running, focused, unfocused_seconds, pending_rewind
+    global running, focused, unfocused_seconds
     running = True
     log.info("SESSION STARTED | current EEG status=%s", current_status)
     focused = True
     unfocused_seconds = 0
-    pending_rewind = 0
     start_button.configure(state="disabled")
     message_label.configure(text="Session started. Monitoring EEG from test.py.")
     send_command("discard")
@@ -151,13 +200,10 @@ def start_session():
 
 
 def set_unfocused():
-    global focused, unfocused_start, unfocused_seconds, pending_rewind
+    global focused, unfocused_start, unfocused_seconds
     if not running or not focused:
         return
     focused = False
-    pending_rewind = 0
-    rewind_button.configure(state="disabled")
-    continue_button.configure(state="disabled")
     log.info("TRACKING distraction started")
     unfocused_start = time.monotonic()
     unfocused_seconds = 0
@@ -167,39 +213,34 @@ def set_unfocused():
 
 
 def set_focused():
-    global focused, unfocused_seconds, pending_rewind
+    global focused, unfocused_seconds
+
     if not running or focused:
         return
-    unfocused_seconds = int((time.monotonic() - unfocused_start) // 5) * 5
-    if unfocused_seconds >= 10:
-        pending_rewind = unfocused_seconds
-        message_label.configure(
-            text=f"You may have missed {pending_rewind} seconds. Rewind?"
-        )
-        rewind_button.configure(state="normal")
-        continue_button.configure(state="normal")
-    else:
-        message_label.configure(text="Short distraction. No rewind needed.")
+
+    unfocused_seconds = int(time.monotonic() - unfocused_start)
     focused = True
-    log.info("TRACKING distraction ended | seconds=%s", unfocused_seconds)
+
+    log.info(
+        "TRACKING distraction ended | seconds=%s",
+        unfocused_seconds
+    )
+
     send_command("focused")
+
+    if unfocused_seconds >= 10:
+        message_label.configure(
+            text="Focus returned. Check YouTube for the rewind popup."
+        )
+        send_command("prompt_rewind")
+    else:
+        message_label.configure(
+            text="Short distraction. No rewind needed."
+        )
+        send_command("discard")
+
     unfocused_seconds = 0
     update_screen()
-
-
-def simulate_unfocused():
-    # Demonstrates session behavior, but cannot overwrite the live EEG label.
-    if not running:
-        message_label.configure(text="Click Start Session first.")
-        return
-    set_unfocused()
-
-
-def simulate_focused():
-    if not running:
-        message_label.configure(text="Click Start Session first.")
-        return
-    set_focused()
 
 
 def update_timer():
@@ -208,32 +249,6 @@ def update_timer():
         unfocused_seconds = int((time.monotonic() - unfocused_start) // 5) * 5
         update_screen()
     app.after(250, update_timer)
-
-
-def continue_lecture():
-    global pending_rewind
-    pending_rewind = 0
-    rewind_button.configure(state="disabled")
-    continue_button.configure(state="disabled")
-    message_label.configure(text="Continuing without rewinding.")
-    send_command("discard")
-
-
-def rewind_lecture():
-    global pending_rewind
-
-    seconds = pending_rewind
-    if seconds == 0:
-        return
-
-    pending_rewind = 0
-    rewind_button.configure(state="disabled")
-    continue_button.configure(state="disabled")
-    message_label.configure(
-        text="Rewind requested. Check the YouTube extension status."
-    )
-
-    send_command("rewind")
 
 
 header = ctk.CTkLabel(
@@ -295,31 +310,6 @@ start_button = ctk.CTkButton(
 )
 start_button.pack(pady=(10, 18))
 
-button_row = ctk.CTkFrame(app, fg_color="transparent")
-button_row.pack(pady=(0, 16))
-
-unfocused_button = ctk.CTkButton(
-    button_row,
-    text="Simulate Unfocused",
-    width=190,
-    height=40,
-    fg_color="#B45B31",
-    hover_color="#944522",
-    command=simulate_unfocused
-)
-unfocused_button.pack(side="left", padx=8)
-
-focused_button = ctk.CTkButton(
-    button_row,
-    text="Simulate Focused",
-    width=190,
-    height=40,
-    fg_color="#247F62",
-    hover_color="#1D624C",
-    command=simulate_focused
-)
-focused_button.pack(side="left", padx=8)
-
 prompt_card = ctk.CTkFrame(app, corner_radius=16)
 prompt_card.pack(fill="x", padx=32, pady=5)
 
@@ -330,41 +320,25 @@ message_label = ctk.CTkLabel(
 )
 message_label.pack(pady=(16, 10), padx=15)
 
-prompt_buttons = ctk.CTkFrame(
-    prompt_card,
-    fg_color="transparent"
-)
-prompt_buttons.pack(pady=(0, 15))
-
-rewind_button = ctk.CTkButton(
-    prompt_buttons,
-    text="Rewind Lecture",
-    width=170,
-    command=rewind_lecture,
-    state="disabled"
-)
-rewind_button.pack(side="left", padx=8)
-
-continue_button = ctk.CTkButton(
-    prompt_buttons,
-    text="Continue",
-    width=140,
-    fg_color="#4B5563",
-    hover_color="#374151",
-    command=continue_lecture,
-    state="disabled"
-)
-continue_button.pack(side="left", padx=8)
-
 recovery_panel = RecoveryPanel(app)
 recovery_panel.pack(fill="both", expand=True, padx=32, pady=10)
 
 def on_close():
     recovery_panel.closed.set()
     stop_network.set()
+    if pico_ser and pico_ser.is_open:
+        try:
+            pico_ser.close()
+        except Exception:
+            pass
     app.destroy()
 
+
 app.protocol("WM_DELETE_WINDOW", on_close)
+
+# Initialize Serial Connection to Raspberry Pi Pico
+init_pico_serial(default_port="COM8")
+
 update_timer()
 start_bridge()
 log.info("DESKTOP STARTING | polling %s", STATUS_URL)

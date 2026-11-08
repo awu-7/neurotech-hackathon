@@ -32,6 +32,8 @@ function resetVideo() {
     savedDistractionTime = null;
     capture = null;
     replay = null;
+    closeRewindPrompt();
+    showStatus("New video loaded");
 }
 
 // Find the YouTube video
@@ -55,11 +57,139 @@ function showStatus(message) {
     }
 
     label.textContent = "Neurotech: " + message;
+
 }
+
+
+function closeRewindPrompt() {
+    const oldPrompt = document.getElementById("neurotech-rewind-prompt");
+
+    if (oldPrompt) {
+        oldPrompt.remove();
+    }
+}
+
+function showRewindPrompt() {
+    if (savedDistractionTime === null || !getVideo()) {
+        showStatus("No distraction timestamp saved");
+        return;
+    }
+
+    closeRewindPrompt();
+
+    const prompt = document.createElement("div");
+    prompt.id = "neurotech-rewind-prompt";
+
+    prompt.style.cssText = `
+        position: fixed;
+        top: 100px;
+        right: 20px;
+        width: 320px;
+        box-sizing: border-box;
+        z-index: 2147483647;
+        background: #141923;
+        color: white;
+        padding: 20px;
+        border: 1px solid #3e5d81;
+        border-radius: 14px;
+        box-shadow: 0 10px 35px rgba(0,0,0,0.5);
+        font-family: Arial, sans-serif;
+        pointer-events: auto;
+    `;
+
+    prompt.innerHTML = `
+        <div style="
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        ">
+            Focus returned!
+        </div>
+
+        <div style="
+            font-size: 14px;
+            line-height: 1.5;
+            margin-bottom: 18px;
+            color: #cbd5e1;
+        ">
+            You may have missed part of the lecture.
+            Would you like to rewind to when you lost focus?
+        </div>
+
+        <div style="display: flex; gap: 10px;">
+            <button id="neurotech-rewind-button" style="
+                background: #377cf6;
+                color: white;
+                border: none;
+                padding: 11px 12px;
+                border-radius: 8px;
+                cursor: pointer;
+                font-weight: bold;
+                flex: 1;
+            ">
+                Rewind Lecture
+            </button>
+
+            <button id="neurotech-continue-button" style="
+                background: #374151;
+                color: white;
+                border: none;
+                padding: 11px 12px;
+                border-radius: 8px;
+                cursor: pointer;
+                font-weight: bold;
+                flex: 1;
+            ">
+                Continue
+            </button>
+        </div>
+    `;
+
+    // Prevent clicks on the popup from affecting YouTube.
+    prompt.addEventListener("pointerdown", (event) => {
+        event.stopPropagation();
+    });
+
+    prompt.addEventListener("click", (event) => {
+        event.stopPropagation();
+    });
+
+    prompt.querySelector("#neurotech-rewind-button")
+        .addEventListener("click", () => {
+            closeRewindPrompt();
+            handleCommand("rewind");
+        });
+
+    prompt.querySelector("#neurotech-continue-button")
+        .addEventListener("click", () => {
+            closeRewindPrompt();
+            handleCommand("discard");
+        });
+
+    // Keep the popup over the video, even in fullscreen.
+    const parent = document.fullscreenElement || document.body;
+    parent.appendChild(prompt);
+}
+
+// Move the popup into or out of YouTube fullscreen.
+document.addEventListener("fullscreenchange", () => {
+    const prompt = document.getElementById("neurotech-rewind-prompt");
+
+    if (prompt) {
+        const parent = document.fullscreenElement || document.body;
+        parent.appendChild(prompt);
+    }
+});
+
 
 // Process commands from the desktop app
 function handleCommand(action) {
     resetVideo();
+    if (action === "prompt_rewind") {
+        showRewindPrompt();
+        return;
+    }
+
     const video = getVideo();
 
     if (!video) {
@@ -68,6 +198,7 @@ function handleCommand(action) {
     }
 
     if (action === "distracted") {
+        closeRewindPrompt();
         if (!videoId || video.paused || video.ended || replay) return;
         capture = {id: crypto.randomUUID(), video_id: videoId, start: video.currentTime};
         savedDistractionTime = video.currentTime;
@@ -92,10 +223,13 @@ function handleCommand(action) {
 
     } else if (action === "discard") {
         capture = null;
+        closeRewindPrompt();
         savedDistractionTime = null;
         showStatus("Distraction cleared");
 
     } else if (action === "rewind") {
+        closeRewindPrompt();
+
         if (savedDistractionTime === null) {
             showStatus("No distraction timestamp saved");
             return;
@@ -181,6 +315,7 @@ function poll() {
             }
             connected = false;
             lastEventId = -1;
+            closeRewindPrompt();
             capture = null;
             savedDistractionTime = null;
             return;
@@ -192,6 +327,7 @@ function poll() {
 
         connected = true;
         if (bridgeSession !== null && bridgeSession !== response.data.session) {
+            closeRewindPrompt();
             capture = null;
             savedDistractionTime = null;
             lastEventId = -1;

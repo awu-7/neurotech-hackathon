@@ -95,14 +95,12 @@ Then:
 
 1. Play a captioned YouTube lecture. Keep it selected in your most recently focused Chrome window.
 2. In NeuroLearn, click **Start Session**.
-3. Click **Simulate Unfocused** and let the lecture play for 15–20 seconds.
-4. Click **Simulate Focused**.
+3. In another terminal, run `.\.venv\Scripts\python.exe simulate_status.py` to publish a short sequence of focus changes.
+4. Wait for focus to return and the captured interval to appear.
 5. Select the captured interval in **AI Lecture Recovery** and click **Explain What I Missed**.
-6. To replay instead, click **Rewind Lecture**. **Continue** dismisses the replay prompt.
+6. For distractions lasting at least 10 seconds, a popup appears on YouTube. Click **Rewind Lecture** to replay or **Continue** to dismiss it. The short simulator sequence does not trigger this popup.
 
-**Leave `test.py` closed during this demo.** The simulation buttons control distraction tracking without changing the EEG status label; that label may still say “Waiting for EEG.”
-
-For a separate check of live status synchronization, run `simulate_status.py` while the server and desktop are open. It publishes a sequence of focus states. Keep `test.py` closed so it does not overwrite the simulator.
+**Leave `test.py` closed during this demo** so it does not overwrite the simulator's focus states.
 
 ## Run with real EEG
 
